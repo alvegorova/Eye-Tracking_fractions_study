@@ -1,0 +1,44 @@
+---
+output:
+  html_document: default
+  pdf_document:
+     latex_engine: xelatex
+  word_document: default
+---
+
+```{r}
+library(aceR)
+library(dplyr)
+library(stringr)
+```
+
+## Merge ACE Raw Data into Data Frame "EF_data"
+```{r}
+devtools::install_github("joaquinanguera/aceR")
+
+path_data<-("RawData/ACE")
+
+EF_data<-proc_ace_complete(path_in=path_data, path_out=NULL, data_type="explorer")
+```
+
+## Clean Participant IDs
+```{r}
+PID<-read.csv("participant_ids.csv")
+colnames(PID)<-"pid"
+PID$pid<-tolower(PID$pid)
+PID$pid<-str_replace(PID$pid,"_", "")
+```
+
+## Merge EF and Participant IDs
+```{r}
+# Merge the data based on the "pid" column
+merged_ACE_data <- EF_data %>%
+  inner_join(PID, by = "pid")
+
+# Write the merged data to a new file
+write.csv(merged_ACE_data, "EF_data_combined.csv", row.names = FALSE)
+
+# Check file
+EF_data_combined<-read.csv("EF_data_combined.csv")
+summary(EF_data_combined)
+```
