@@ -1,0 +1,4388 @@
+---
+title: "Fractions_clustering_Apr14_2025"
+author: "Alena"
+date: "2025-04-14"
+output: 
+  html_document: 
+    fig_width: 9
+    toc: true
+    toc_float: true
+    theme: united
+    code_folding: hide
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!require(dbscan)) install.packages("dbscan", repos = "http://cran.us.r-project.org")
+if (!require(cluster)) install.packages("cluster", repos = "http://cran.us.r-project.org")
+if (!require(factoextra)) install.packages("factoextra", repos = "http://cran.us.r-project.org")
+if (!require(scales)) install.packages("scales", repos = "http://cran.us.r-project.org")
+if (!require(dunn.test)) install.packages("dunn.test", repos = "http://cran.us.r-project.org")
+#if (!require(read_csv)) install.packages("read_csv", repos = "http://cran.us.r-project.org")
+if (!require(lme4)) install.packages("lme4", repos = "http://cran.us.r-project.org")
+if (!require(estimatr)) install.packages("estimatr", repos = "http://cran.us.r-project.org") 
+if (!require(kableExtra)) install.packages("kableExtra", repos = "http://cran.us.r-project.org") 
+if (!require(glmmTMB)) install.packages("glmmTMB", repos = "http://cran.us.r-project.org") 
+if (!require(car)) install.packages("car", repos = "http://cran.us.r-project.org") 
+
+
+library(readr) # for reading csv
+library(apaTables) # for apa.cor.table
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(dunn.test)
+library(estimatr) #for lm_robust()
+library(kableExtra) # for tables
+library(glmmTMB)
+library(car) # for normality checking
+library(lmtest) # for normality checking
+library(psych) # for internal consistency test
+library(dunn.test)
+library(tidyverse)
+library(effectsize) # for standardized beta
+
+
+```
+
+
+# Problem-level data
+
+```{r math_data, include=FALSE}
+
+rm(list = ls())
+
+setwd("~/Documents/Data_Analysis/Eye_tracking_fractions/Code/Output_files")
+
+# Read the data with explicit column types
+math_data <- read_csv("Math_data.csv")
+
+setwd("~/Documents/Data_Analysis/Eye_tracking_fractions/Code/Analysis")
+
+# Data format
+math_data$pid <- as.character(math_data$pid)
+math_data$Condition <- as.factor(math_data$Condition)
+math_data$Image <- as.factor(math_data$Image)
+math_data$Correct <- as.logical(math_data$Correct)
+math_data$problem_Order <- as.factor(math_data$problem_Order)
+math_data$HOO_Position <- as.factor(math_data$HOO_Position)
+math_data$Simplification <- as.factor(math_data$Simplification)
+
+math_data$Correct <- ifelse(is.na(math_data$Correct), FALSE, math_data$Correct)
+
+# Adding type of test variable (is this pretest problem or experiment problem)
+math_data <- math_data %>% mutate(Test = ifelse (grepl("^P", Image), "Pretest", "Experiment"))
+math_data$Test <- as.factor(math_data$Test)
+
+```
+
+
+```{r pretest_math_data_investigation, include=FALSE}
+
+# How many participants in each condition
+math_data %>%
+  group_by(pid) %>%
+  summarise(n = n(), .groups = "drop") 
+
+## -- -- -- -- -- -- -- -- -- -- --
+##   Time data investigation
+## -- -- -- -- -- -- -- -- -- -- --
+
+# Response time distribution
+ggplot(math_data, aes(x = trialElapsedTime, fill = Test)) +
+  geom_histogram(alpha = 0.5, binwidth = 10) +
+  labs(title = "Distribution of time",
+       x = "Mean Time",
+       y = "Density")
+
+# Investigating unrealistically quick responses 
+table(round(math_data$trialElapsedTime, 0))
+
+# Pretest and experiment quick responses
+
+## Identify participants who had trials < 5 sec in pretest and experiment
+quick_trials <- math_data %>%
+  filter(trialElapsedTime <= 5) %>%
+  group_by(pid, Condition, Test) %>%
+  summarise(quick_trial_count = n(), .groups = "drop")
+
+## Show quick trial counts for each participant in Pretest and Experiment
+quick_trials %>%
+  pivot_wider(names_from = Test, values_from = quick_trial_count, values_fill = list(quick_trial_count = 0))
+
+## To see detailed info:
+#experiment_data %>%  filter(pid == "wpi61740524s9759r04") %>% select (Condition, Image, Correct, trialElapsedTime, finalNumerator, finalDenominator, true_final_numerator, true_final_denominator, pid) %>% print()
+
+```
+
+``` {r pretest_math_data_cleaning, include=FALSE}
+
+## -- -- -- -- -- -- -- -- -- -- --
+##   Pretest time data cleaning
+## -- -- -- -- -- -- -- -- -- -- --
+
+## Identify participants who had at least half of <= 5 sec trials on pretest
+quick_trials_pretest <- math_data %>%
+  filter(Test == "Pretest" & trialElapsedTime <= 5) %>%
+  group_by(pid, Condition, Test) %>%
+  summarise(quick_trial_count = n(), .groups = "drop") %>%
+  filter (quick_trial_count > 3)
+
+# Delete participants with at least half of quick trials in exp
+math_data <- math_data %>% filter (! (pid %in% quick_trials_pretest$pid) )
+
+# 1/1 and 0/0 responses search
+math_data %>%
+  filter(Test == "Pretest" & 
+           ((finalNumerator == 1 & finalDenominator == 1) | (finalNumerator == 0 & finalDenominator == 0)) ) %>%
+  group_by(pid, Condition, Test) %>%
+  summarise(fake_trial_count = n(), .groups = "drop") %>%
+  filter (fake_trial_count > 2)
+
+# Excluding 2 additional participants:
+## wpi61740524s9759r04 -- left sums as responses (e.g., 10+1)
+## wpi6p173e3404848397 -- 0/0 > than 3 times
+math_data <- math_data %>% filter (!pid %in% c("wpi61740524s9759r04", "wpi6p173e3404848397") )
+
+# Deleting  individual trials with responses quicker than 5 seconds
+math_data <- math_data %>% 
+  filter(! (Test == "Pretest" & trialElapsedTime <= 5) )
+
+
+
+```
+
+```{r exp_math_data_investigation, include=FALSE}
+
+## -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+##    Experimental time data investigation
+## -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+
+# Time distribution now
+ggplot(math_data, aes(x = trialElapsedTime, fill = Test)) +
+  geom_histogram(alpha = 0.5, binwidth = 10) +
+  labs(title = "Distribution of time",
+       x = "Mean Time",
+       y = "Density")
+
+# Separating experiment math data
+experiment_data <- math_data %>% filter(Test == "Experiment")
+
+# Investigating unrealistically quick responses 
+table(round(experiment_data$trialElapsedTime, 0))
+
+```
+
+``` {r exp_math_data_time_cleaning, include=FALSE}
+
+## Identify participants who had trials < 5 sec
+quick_trials_exp <- experiment_data %>%
+  filter(trialElapsedTime <= 5) %>%
+  group_by(pid, Condition, Test) %>%
+  summarise(quick_trial_count = n(), .groups = "drop") %>%
+  filter (quick_trial_count > 3) # It's in reality more than 7 each time in the experiment but keep 3 for consistency
+
+# Delete participants with at least half of quick trials in exp
+math_data <- math_data %>% filter (! (Test == "Experiment" & pid %in% quick_trials_exp$pid) )
+
+# How many quick responses are left?
+math_data %>%
+  filter(Test == "Experiment" & trialElapsedTime <= 5)
+
+## Excluding individual trials with responses quicker than 5 seconds
+math_data <- math_data %>%
+  filter(! (Test == "Experiment" & trialElapsedTime <= 5) )
+
+## wpi617z40o880451621 -- tried (many correct), did not try last 2 in exp: both quick and have 1/1 (CC7.png, CC10.png) (Congruent) (CC10 is already excluded on the previous step (< 2 sec))
+math_data <- math_data %>% filter (! (pid == "wpi617z40o880451621" & Image %in% c("CC7.png") ) )
+
+fake_trial_exp_students <- math_data %>%
+  filter(Test == "Experiment" & 
+           ((finalNumerator == 1 & finalDenominator == 1) | (finalNumerator == 0 & finalDenominator == 0)) ) %>%
+  group_by(pid, Condition, Test) %>%
+  summarise(fake_trial_count = n(), .groups = "drop") %>%
+  filter (fake_trial_count > 2)
+
+math_data <- math_data %>%
+  filter(! (Test == "Experiment" & pid == fake_trial_exp_students$pid) )
+
+```
+
+
+```{r math_data_consistency_correctness, include=FALSE}
+
+## -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+##   Internal consistency of pretest problem difficulties: correctness
+## -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+
+# Pretest consistency
+
+## Preparing dataset
+pretest_data <- math_data %>% filter(Test == "Pretest")
+
+print("Pretest")
+print("trials:")
+length(pretest_data$pid)
+print("partisipants:")
+length(unique(pretest_data$pid))
+
+## Pivot data to wide format
+wide_data <- pretest_data %>%
+  select(pid, Image, Correct) %>%   # Select relevant columns
+  pivot_wider(names_from = Image, values_from = Correct, values_fill = list(Correct = NA))
+
+## Ensure Correct columns are numeric
+wide_data_numeric <- wide_data %>% select(-pid) %>% mutate_all(as.numeric)
+
+## Compute Cronbach’s alpha
+alpha(wide_data_numeric)
+
+# Experiment consistency: congruent condition
+
+## Preparing datasets
+experiment_data <- math_data %>% filter(Test == "Experiment")
+exp_congruent_data <- experiment_data %>% filter(Condition == "Congruent")
+exp_incongruent_data <- experiment_data %>% filter(Condition == "Incongruent")
+
+print("Experiment: congruent")
+print("trials:")
+length(exp_congruent_data$pid)
+print("partisipants:")
+length(unique(exp_congruent_data$pid))
+
+## Pivot data to wide format
+wide_data <- exp_congruent_data %>%
+  select(pid, Image, Correct) %>%   # Select relevant columns
+  pivot_wider(names_from = Image, values_from = Correct, values_fill = list(Correct = NA))
+
+## Ensure Correct columns are numeric
+wide_data_numeric <- wide_data %>% select(-pid) %>% mutate_all(as.numeric)
+
+## Compute Cronbach’s alpha
+alpha(wide_data_numeric)
+
+# Experiment consistency: incongruent condition
+
+print("Experiment: incongruent")
+print("trials:")
+length(exp_incongruent_data$pid)
+print("partisipants:")
+length(unique(exp_incongruent_data$pid))
+
+## Pivot data to wide format
+wide_data <- exp_incongruent_data %>%
+  select(pid, Image, Correct) %>%   # Select relevant columns
+  pivot_wider(names_from = Image, values_from = Correct, values_fill = list(Correct = NA))
+
+## Ensure Correct columns are numeric
+wide_data_numeric <- wide_data %>% select(-pid) %>% mutate_all(as.numeric)
+
+## Compute Cronbach’s alpha
+alpha(wide_data_numeric)
+
+```
+
+
+```{r math_data_consistency_time, include=FALSE}
+
+## -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+##   Internal consistency of pretest problem difficulties: response time
+## -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+
+# Pretest consistency
+
+print("Pretest")
+
+## Pivot data to wide format
+wide_data <- pretest_data %>%
+  select(pid, Image, trialElapsedTime) %>%   # Select relevant columns
+  pivot_wider(names_from = Image, values_from = trialElapsedTime, values_fill = list(trialElapsedTime = NA))
+
+## Ensure trialElapsedTime columns are numeric
+wide_data_numeric <- wide_data %>% select(-pid) %>% mutate_all(as.numeric)
+
+## Compute Cronbach’s alpha
+alpha(wide_data_numeric)
+
+# Experiment consistency: congruent condition
+
+print("Experiment: congruent")
+
+## Pivot data to wide format
+wide_data <- exp_congruent_data %>%
+  select(pid, Image, trialElapsedTime) %>%   # Select relevant columns
+  pivot_wider(names_from = Image, values_from = trialElapsedTime, values_fill = list(trialElapsedTime = NA))
+
+## Ensure trialElapsedTime columns are numeric
+wide_data_numeric <- wide_data %>% select(-pid) %>% mutate_all(as.numeric)
+
+## Compute Cronbach’s alpha
+alpha(wide_data_numeric)
+
+# Experiment consistency: incongruent condition
+
+print("Experiment: incongruent")
+
+## Pivot data to wide format
+wide_data <- exp_incongruent_data %>%
+  select(pid, Image, trialElapsedTime) %>%   # Select relevant columns
+  pivot_wider(names_from = Image, values_from = trialElapsedTime, values_fill = list(trialElapsedTime = NA))
+
+## Ensure trialElapsedTime columns are numeric
+wide_data_numeric <- wide_data %>% select(-pid) %>% mutate_all(as.numeric)
+
+## Compute Cronbach’s alpha
+alpha(wide_data_numeric)
+
+```
+
+## Problem-level correctness and response time distributions
+
+```{r plot_correctness, include=TRUE, warning=FALSE, message=FALSE, fig.show='hold'}
+# Only create plots if we have data
+
+# Simple correctness distribution
+ggplot(pretest_data, aes(x=Correct)) +
+    geom_bar(alpha = 0.5) +
+    labs(title = "Distribution of Correct Responses")
+
+# Distribution by Higher-Order-Operator Position and Simplification
+ggplot(pretest_data, aes(x=Correct, fill=Simplification)) +
+    geom_bar(alpha = 0.5, position = "dodge") +
+    facet_wrap(~HOO_Position) +
+    labs(title = "Distribution by Higher-Order-Operator Position and Simplification Option") +
+    theme_minimal()
+  
+```
+
+
+
+```{r math_data_preparing_mean_data, include=FALSE}
+
+## -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+##    Calculation student-level pretest data
+## -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+
+pretest_data <- pretest_data %>% mutate (Composite_score = Correct/trialElapsedTime)
+
+# Pretest datasets
+pretest_mean_data <- pretest_data %>% 
+  group_by (pid) %>%
+  summarise(Pre_MP = mean(Correct),
+            Pre_Time = mean(trialElapsedTime, na.rm = TRUE),
+            Composite_score_pre = mean(Composite_score, na.rm = TRUE))
+
+pretest_mean_data_simp <- pretest_data %>% 
+  filter (Simplification == "Yes") %>%
+  group_by (pid) %>%
+  summarise(Pre_MP_Simp = mean(Correct),
+            Pre_Time_Simp = mean(trialElapsedTime, na.rm = TRUE))
+
+pretest_mean_data_no_simp <- pretest_data %>% 
+  filter (Simplification == "No") %>%
+  group_by (pid) %>%
+  summarise(Pre_MP_NoSimp = mean(Correct),
+            Pre_Time_NoSimp = mean(trialElapsedTime, na.rm = TRUE))
+
+pretest_mean_data_HOO_left <- pretest_data %>% 
+  filter (HOO_Position == "Left") %>%
+  group_by (pid) %>%
+  summarise(Pre_MP_Left = mean(Correct),
+            Pre_Time_Left = mean(trialElapsedTime, na.rm = TRUE))
+
+pretest_mean_data_HOO_right <- pretest_data %>% 
+  filter (HOO_Position == "Right") %>%
+  group_by (pid) %>%
+  summarise(Pre_MP_Right = mean(Correct),
+            Pre_Time_Right = mean(trialElapsedTime, na.rm = TRUE))
+
+pretest_mean_time_correct <- pretest_data %>% 
+  group_by (pid) %>%
+  filter (Correct == "TRUE") %>%
+  summarise(Pre_Time_Correct = mean(trialElapsedTime, na.omit = TRUE ))
+
+pretest_mean_time_incorrect <- pretest_data %>% 
+  filter (Correct == "FALSE") %>%
+  group_by (pid) %>%
+  summarise(Pre_Time_Incorrect = mean(trialElapsedTime, na.rm = TRUE))
+
+## Merging pretest math means
+pretest_math_mean_data <- pretest_mean_data %>%
+  merge(pretest_mean_data_simp, by = "pid") %>%
+  merge(pretest_mean_data_no_simp, by = "pid") %>%
+  merge(pretest_mean_data_HOO_left, by = "pid") %>%
+  merge(pretest_mean_data_HOO_right, by = "pid") %>%
+  merge(pretest_mean_time_correct, by = "pid", all.x = TRUE) %>%
+  merge(pretest_mean_time_incorrect, by = "pid", all.x = TRUE)
+
+# Create new variable with three levels of Pre_MP
+pretest_math_mean_data <- pretest_math_mean_data %>%
+  mutate(
+    Pre_MP_level = case_when(
+      Pre_MP <= mean(Pre_MP, na.rm = TRUE) - sd(Pre_MP, na.rm = TRUE) ~ "-1 SD",
+      Pre_MP >= mean(Pre_MP, na.rm = TRUE) + sd(Pre_MP, na.rm = TRUE) ~ "+1 SD",
+      TRUE ~ "Mean"
+    )
+  )
+
+```
+
+
+```{r demo_data, include=FALSE}
+
+## -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+##   Adding student-level self-reported data
+## -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+
+setwd("~/Documents/Data_Analysis/Eye_tracking_fractions/Code/Output_files")
+
+# Read the data with explicit column types
+student_data <- read_csv("MP_MA_Demo_Student_data.csv")
+
+setwd("~/Documents/Data_Analysis/Eye_tracking_fractions/Code/Analysis")
+
+student_data <- merge(student_data, pretest_math_mean_data, by = "pid", suffixes = c("", "_drop"))
+student_data <- student_data[, !grepl("_drop$", names(student_data))]
+
+# Adding MA levels
+student_data <- student_data %>%
+  mutate(MA_level = cut(MA, 
+                       breaks = c(-Inf, 2.5, 3.5, Inf),
+                       labels = c("Low MA", "Medium MA", "High MA"),
+                       include.lowest = TRUE))
+
+# MP levels
+student_data <- student_data %>%
+  mutate(MP_level = cut(Pre_MP, 
+                       breaks = c(-Inf, 0.33, 0.66, Inf),
+                       labels = c("Low MP", "Medium MP", "High MP"),
+                       include.lowest = TRUE))
+                        
+
+```
+
+```{r problem_level_data_with_demo_data, include=FALSE}
+
+## -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+##   Adding student-level data to problem-level
+## -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+
+problem_level_math_student_data <- merge(math_data, student_data, by = "pid", suffixes = c("", "_drop"), all.x = TRUE)
+problem_level_math_student_data <- problem_level_math_student_data[, !grepl("_drop$", names(problem_level_math_student_data))]
+
+```
+
+# Student-level descriptives
+
+## Pretest correctness data distributions
+
+```{r math_data_compare, include=TRUE, warning=FALSE, message=FALSE}
+
+ggplot(student_data, aes(x = Pre_MP)) +
+  geom_histogram(alpha = 0.5, fill = "blue", bins = 12) +
+  labs(title = "Distribution of MP",
+       x = "Math performance",
+       y = "Density")
+
+## Make simplification-level dataset
+pretest_mean_data_if_simp <- pretest_data %>% 
+  group_by (pid, Simplification) %>%
+  summarise(Pre_MP = mean(Correct),
+            Pre_Time = mean(trialElapsedTime))
+
+# Plot correctness distribution by Simplification
+ggplot(pretest_mean_data_if_simp, aes(x = Pre_MP, fill = Simplification)) +
+  geom_histogram(alpha = 0.5, bins = 12) +
+  facet_wrap (~Simplification) +
+  labs(title = "Distribution of Pretest Correctness by Simplification",
+       x = "Mean Correctness",
+       y = "Density")
+
+## Make HOO-position-level dataset
+pretest_mean_data_if_HOO <- pretest_data %>% 
+  group_by (pid, HOO_Position) %>%
+  summarise(Pre_MP = mean(Correct),
+            Pre_Time = mean(trialElapsedTime))
+
+# Plot correctness distribution by HOO_Position
+ggplot(pretest_mean_data_if_HOO, aes(x = Pre_MP, fill = HOO_Position)) +
+  geom_histogram(alpha = 0.5, bins = 12) +
+  facet_wrap (~HOO_Position) +
+  labs(title = "Distribution of Pretest Correctness by HOO_Position",
+       x = "Mean Correctness",
+       y = "Density")
+
+```
+
+## Math anxiety distribution
+
+```{r MA_distribution_plots, echo=FALSE, warning=FALSE, message=FALSE}
+
+## General MA
+# Plot
+ggplot(student_data, aes(x = MA)) +
+  geom_histogram(alpha = 0.5, fill = "green", bins = 36) +
+  labs(title = "Distribution of general math anxiety (MA) score",
+       x = "Math anxiety",
+       y = "Density")
+
+table(student_data$MA)
+
+table(student_data$MA_level)
+
+## Emotional MA
+# Plot
+ggplot(student_data, aes(x = MA_EM_mean)) +
+  geom_histogram(alpha = 0.5, fill = "green", bins = 36) +
+  labs(title = "Distribution of MA Emotional",
+       x = "Math anxiety",
+       y = "Density")
+
+# MA Levels
+student_data <- student_data %>%
+  mutate(MA_EM_mean_level = cut(MA_EM_mean, 
+                       breaks = c(-Inf, 2.5, 3.5, Inf),
+                       labels = c("Low MA", "Medium MA", "High MA"),
+                       include.lowest = TRUE))
+table(student_data$MA_EM_mean_level)
+
+# Worry MA
+ggplot(student_data, aes(x = MA_WO_mean)) +
+  geom_histogram(alpha = 0.5, fill = "green", bins = 36) +
+  labs(title = "Distribution of MA Worry",
+       x = "Math anxiety",
+       y = "Density")
+# Levels
+student_data <- student_data %>%
+  mutate(MA_WO_mean_level = cut(MA_WO_mean, 
+                       breaks = c(-Inf, 2.5, 3.5, Inf),
+                       labels = c("Low MA", "Medium MA", "High MA"),
+                       include.lowest = TRUE))
+table(student_data$MA_WO_mean_level)
+
+## Evaluative MA
+# Plot
+ggplot(student_data, aes(x = MA_EV_mean)) +
+  geom_histogram(alpha = 0.5, fill = "green", bins = 36) +
+  labs(title = "Distribution of MA Evaluative",
+       x = "Math anxiety",
+       y = "Density")
+# Levels
+student_data <- student_data %>%
+  mutate(MA_EV_mean_level = cut(MA_EV_mean, 
+                       breaks = c(-Inf, 2.5, 3.5, Inf),
+                       labels = c("Low MA", "Medium MA", "High MA"),
+                       include.lowest = TRUE))
+table(student_data$MA_EV_mean_level)
+
+```
+
+## Plot of math performance on pretest and math anxiety
+
+```{r cor_matrix_mp_ma, echo=TRUE}
+
+ggplot(student_data, aes(MA, Pre_MP)) + 
+  geom_jitter()
+
+```
+
+
+## Correlation matrix
+
+```{r cor_matrix, include=TRUE}
+
+student_data <- student_data %>% mutate (arousal_Pretest_mean = 
+                           (arousal_Pretest_3 + 
+                              arousal_Pretest_7 + arousal_Pretest_12)/3)
+
+student_data <- student_data %>% mutate (valence_Pretest_mean = 
+                           (valence_Pretest_3 + 
+                              valence_Pretest_7 + valence_Pretest_12)/3)
+
+## MA, MP and time
+data_quant <- 
+  student_data [, (colnames(student_data) %in% 
+             c('MA', 'Pre_MP', 'Pre_Time', 'arousal_Pretest_mean', 'valence_Pretest_mean'))]
+
+# Creating matrix
+apa.cor.table(
+  data = data_quant,
+  filename = "Descriptives.doc",
+  table.number = 1,
+  show.conf.interval = TRUE,
+  show.sig.stars = TRUE,
+  landscape = TRUE
+)
+
+```
+
+
+```{r conditions_difference, include = FALSE}
+
+## -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+##   Difference in math anxiety and pretest performance between conditions
+## -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+
+print ("for math anxiety")
+summary(aov(MA ~ Condition, data = student_data))
+
+print ("for pretest performance")
+summary(aov(Pre_MP ~ Condition, data = student_data))
+
+```
+
+# RQ1: Clustering
+
+```{r kmean packages, include = FALSE}
+
+#install.packages(c("factoextra", "cluster", "NbClust", "ggfortify", "RColorBrewer", "corrplot"), repos="http://cran.us.r-project.org")
+
+library(factoextra)
+library(cluster)  # clustering algorithms
+library(NbClust)  # clustering algorithms & visualization
+library(ggfortify)
+
+```
+
+```{r RQ1_standartization, include = TRUE}
+
+### --- Z-scoring for clustering
+
+# Z-scoring MP and MA
+student_data$Pre_MP_z <- 
+  (student_data$Pre_MP - mean(student_data$Pre_MP))/sd(student_data$Pre_MP)
+student_data$MA_z <- 
+  (student_data$MA - mean(student_data$MA))/sd(student_data$MA)
+
+# Creating new dataframes for PRE-levels clustering based on scaled variables
+PRE_z <- student_data %>% as.data.frame() %>%
+  dplyr::select(MA_z, Pre_MP_z)
+
+```
+
+## Elbow method
+
+```{r RQ1 choosing clusters with elbow method, echo = TRUE}
+
+### --- How many clusters - Elbow method (widely used, recommended)
+fviz_nbclust(PRE_z, kmeans, method = "wss") +
+  geom_vline(xintercept = 3, linetype = 2)+
+  labs(subtitle = "Elbow method")
+
+```
+
+## Silhouette scores
+
+```{r RQ1 choosing clusters with Silhouette scores, echo = TRUE}
+# Range of cluster numbers to test
+silhouette_scores <- numeric(10)
+
+# Loop through different numbers of clusters
+for (k in 3:10) {
+  set.seed(123)  # For reproducibility
+  kmeans_result <- kmeans(PRE_z, centers = k)
+  sil <- silhouette(kmeans_result$cluster, dist(PRE_z))
+  silhouette_scores[k] <- mean(sil[, 3])  # Average Silhouette score for this k
+}
+
+# Find the number of clusters with the highest average Silhouette score
+best_k <- which.max(silhouette_scores)
+cat("The optimal number of clusters is", best_k, "with an average Silhouette score of", silhouette_scores[best_k], "\n")
+
+# Plot the Silhouette scores for each number of clusters
+plot(3:10, silhouette_scores[3:10], type = "b",
+     xlab = "Number of Clusters", ylab = "Average Silhouette Score",
+     main = "Silhouette Score for Different Numbers of Clusters")
+
+```
+
+```{r RQ1, include = FALSE}
+
+### --- Applying k-means clustering
+set.seed(20)
+pre_cluster <- kmeans(PRE_z, centers = 3, nstart = 25) # we put the optimal number of clusters in "centers"
+print(pre_cluster)   
+
+# Save the cluster number in the dataset as column 'cluster_results'
+student_data$pre_cluster_results <- as.factor(pre_cluster$cluster)
+
+```
+
+## Visualizing clusters
+
+```{r RQ1 visualizing clusters, echo = T}
+ggplot(student_data, aes(MA, Pre_MP)) + 
+  geom_jitter(col = student_data$pre_cluster_results)
+```
+
+
+
+
+
+## Clusters' demographics
+
+```{r analyzing_clusters, echo = FALSE}
+# Save the cluster number in the dataset as column 'cluster_results'
+student_data$pre_cluster_results <- as.factor(pre_cluster$cluster)
+
+## Saving clusters mean MP and MA values
+student_data <- student_data %>% 
+ group_by(pre_cluster_results) %>% 
+  mutate(PreMP_mean = mean(Pre_MP), 
+            PreMP_sd = sd(Pre_MP), 
+            PreMA_mean = mean(MA),
+            PreMA_sd = sd(MA)) %>%
+  ungroup()
+
+## Saving clusters names based on mean MP and MA values
+# Put in MP levels
+student_data$pre_MP_group <- 
+  ifelse(student_data$PreMP_mean<mean(student_data$Pre_MP, na.rm=TRUE), 
+         "lMP", "hMP")
+# Put in MA levels
+student_data$pre_MA_group <- 
+  ifelse(student_data$PreMA_mean < (mean(student_data$MA, na.rm=TRUE) - sd(student_data$MA, na.rm=TRUE) ), 
+         "lMA", 
+         ifelse ( student_data$PreMA_mean > (mean(student_data$MA, na.rm=TRUE) + sd(student_data$MA, na.rm=TRUE) ), "hMA", "mMA"))
+# Combining MP and MA levels into one var
+student_data$pre_cluster_groups <- 
+  paste(student_data$pre_MP_group, student_data$pre_MA_group, sep="_")
+
+## Saving clusters as factors with appropriate levels
+#student_data$pre_cluster_groups <- 
+#  factor(student_data$pre_cluster_groups, 
+#         levels = c("hMP_hMA", "lMP_hMA", "lMP_lMA", "hMP_lMA"))
+
+## Calculating means in clusters to check if they are correct
+student_data %>% 
+ group_by(pre_cluster_groups) %>% 
+  summarise(PreMP_mean = mean(Pre_MP), 
+            PreMP_sd = sd(Pre_MP), 
+            PreMA_mean = mean(MA),
+            PreMA_sd = sd(MA),
+            n = n())
+
+# To compare to the best group
+#student_data$pre_cluster_groups_best <- 
+#  factor(student_data$pre_cluster_groups, 
+#         levels = c("hMP_lMA", "hMP_hMA", "lMP_lMA", "lMP_hMA"))
+
+```
+
+```{r cluster_MP_MA_vis, echo = T}
+
+# Create a combined visualization with facets for each variable and cluster
+student_data <- student_data %>% mutate (Pre_MP_scaled = scale(Pre_MP),
+                                         MA_scaled = scale(MA))
+
+student_data_long_subscales <- pivot_longer(student_data,
+                               cols = c('MA_scaled', 'Pre_MP_scaled'),
+                               names_to = 'Variable',
+                               values_to = 'Value')
+
+# Boxplots fro MP and MA for all clusters
+ggplot(student_data_long_subscales, aes(x = Variable, y = Value, fill = Variable,  alpha = 0.5)) +
+  geom_boxplot() +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95) +
+  geom_jitter(alpha = 0.5) +
+  #facet_wrap(~Image) +
+  labs(x = "Cluster", 
+       y = "Value") +
+  facet_wrap(~ pre_cluster_groups, scales = "fixed") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+```{r clusters_demo, echo=FALSE}
+library(gtsummary)
+student_data %>% 
+  dplyr::select(c('gender', 'race_ethnicity', 'age', 'pre_cluster_groups')) %>% 
+  tbl_summary(by='pre_cluster_groups')
+
+print ("Ages in clusters")
+student_data %>% group_by (pre_cluster_groups) %>% summarise (mean = mean(age), sd = sd(age))
+
+```
+
+
+
+## Comparison by performance on the pretest (Pre_MP)
+
+```{r comparison of MP, echo = TRUE}
+
+## MP comparison
+dunn.test(student_data$Pre_MP, g=student_data$pre_cluster_groups, method='bonferroni')
+
+# Create boxplot to visualize the difference
+ggplot(student_data, 
+       aes(x = pre_cluster_groups, y = Pre_MP, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "Pretest Math Performance",
+       title = "Math Performance Comparison between hMP_lMA and hMP_mMA Groups") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+# Modeling using interaction
+model <- lm_robust(Pre_MP ~ MA, data = student_data)
+summary(model)
+
+```
+
+## Comparison by math anxiety (MA)
+
+```{r comparison of MA, echo = TRUE}
+
+## MA comparison
+dunn.test(student_data$MA, g=student_data$pre_cluster_groups, method='bonferroni')
+
+# Create boxplot to visualize the difference
+ggplot(student_data, 
+       aes(x = pre_cluster_groups, y = MA, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "Math Anxiety",
+       title = "Math Anxiety Comparison between hMP_lMA and hMP_mMA Groups") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+```
+
+## Comparison by arousal
+
+### Before pretest
+
+```{r arousal_prepre, include = TRUE}
+
+hist(student_data$arousal_PrePre)
+
+## Arousal comparison
+dunn.test(student_data$arousal_PrePre, g=student_data$pre_cluster_groups, method='bonferroni')
+
+student_data %>% 
+ group_by(pre_cluster_groups) %>% 
+  summarise(arousal_Pretest_mean_mean = mean(arousal_PrePre), 
+            arousal_Pretest_mean_sd = sd(arousal_PrePre))
+
+# Create boxplot to visualize the difference
+ggplot(student_data, 
+       aes(x = pre_cluster_groups, y = arousal_PrePre, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "Mean PrePre Arousal",
+       title = "Mean Pretest Arousal Comparison between hMP_lMA and hMP_mMA Groups") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+# Modeling with lm_robust()
+model <- lm_robust(log(arousal_PrePre) ~ scale(MA) * scale(Pre_MP), data = student_data)
+summary(model)
+
+# Plotting by continuous
+ggplot(student_data, aes(x = MA, y = arousal_PrePre, color = as.factor(round(Pre_MP/2, 1)), alpha = 0.7)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95) +
+  geom_jitter() +
+  labs(x = "Math anxiety", 
+       y = "arousal_PrePre",
+       color = "MP_level") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Lm_robust with MA
+model <- lm_robust(arousal_PrePre ~ MA, data = student_data)
+summary(model)
+
+# Modeling using interaction
+model <- lm_robust(arousal_PrePre ~ MA*Pre_MP, data = student_data)
+summary(model)
+
+```
+
+### During pretest
+
+```{r arousal, include = TRUE}
+
+hist(student_data$arousal_Pretest_mean)
+
+## Arousal comparison
+dunn.test(student_data$arousal_Pretest_mean, g=student_data$pre_cluster_groups, method='bonferroni')
+
+student_data %>% 
+ group_by(pre_cluster_groups) %>% 
+  summarise(arousal_Pretest_mean_mean = mean(arousal_Pretest_mean), 
+            arousal_Pretest_mean_sd = sd(arousal_Pretest_mean))
+
+# Create boxplot to visualize the difference
+ggplot(student_data, 
+       aes(x = pre_cluster_groups, y = arousal_Pretest_mean, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "Mean Pretest Arousal",
+       title = "Mean Pretest Arousal Comparison between hMP_lMA and hMP_mMA Groups") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+# Modeling with lm_robust()
+model <- lm_robust(arousal_Pretest_mean ~ scale(MA) * scale(Pre_MP), data = student_data)
+summary(model)
+
+# Plotting by continuous
+ggplot(student_data, aes(x = MA, y = arousal_Pretest_mean, color = as.factor(MP_level), alpha = 0.7)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95) +
+  geom_jitter() +
+  labs(x = "Math anxiety", 
+       y = "arousal_Pretest_mean",
+       color = "MP_level") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Lm_robust with MA
+model <- lm_robust(arousal_Pretest_mean ~ MA, data = student_data)
+summary(model)
+
+# Modeling using interaction
+model <- lm_robust(arousal_Pretest_mean ~ MA*Pre_MP, data = student_data)
+summary(model)
+
+```
+
+## Comparison by valence
+
+### Before pretest
+
+```{r valence_prepre, include = TRUE}
+
+hist(student_data$valence_PrePre)
+shapiro.test(student_data$valence_PrePre)
+
+## Arousal comparison
+dunn.test(student_data$valence_PrePre, g=student_data$pre_cluster_groups, method='bonferroni')
+
+student_data %>% 
+ group_by(pre_cluster_groups) %>% 
+  summarise(valence_Pretest_mean_mean = mean(valence_PrePre), 
+            valence_Pretest_mean_sd = sd(valence_PrePre))
+
+# Create boxplot to visualize the difference
+ggplot(student_data, 
+       aes(x = pre_cluster_groups, y = valence_PrePre, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "Mean Pretest Valence",
+       title = "Valence Comparison between hMP_lMA and hMP_mMA Groups") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+# Modeling with lm_robust()
+model <- lm_robust(valence_PrePre ~ scale(MA) * scale(Pre_MP), data = student_data)
+summary(model)
+
+# Plotting by continuous
+ggplot(student_data, aes(x = MA, y = valence_PrePre, color = as.factor(MP_level), alpha = 0.7)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95) +
+  geom_jitter() +
+  labs(x = "Math anxiety", 
+       y = "valence_PrePre",
+       color = "MP_level") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+
+```
+
+### During pretest
+
+```{r valence, include = TRUE}
+
+hist(student_data$valence_Pretest_mean)
+
+## Arousal comparison
+dunn.test(student_data$valence_Pretest_mean, g=student_data$pre_cluster_groups, method='bonferroni')
+
+student_data %>% 
+ group_by(pre_cluster_groups) %>% 
+  summarise(valence_Pretest_mean_mean = mean(valence_Pretest_mean), 
+            valence_Pretest_mean_sd = sd(valence_Pretest_mean))
+
+# Create boxplot to visualize the difference
+ggplot(student_data, 
+       aes(x = pre_cluster_groups, y = valence_Pretest_mean, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "Mean Pretest Valence",
+       title = "Valence Comparison between hMP_lMA and hMP_mMA Groups") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+# Modeling with lm_robust()
+model <- lm_robust(valence_Pretest_mean ~ scale(MA) * scale(Pre_MP), data = student_data)
+summary(model)
+
+# Plotting by continuous
+ggplot(student_data, aes(x = MA, y = valence_Pretest_mean, color = as.factor(round(Pre_MP/2, 1)), alpha = 0.7)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95) +
+  geom_jitter() +
+  labs(x = "Math anxiety", 
+       y = "valence_Pretest_mean",
+       color = "MP_level") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+# RQ2: Pretest differences in efficiency
+
+## Response time
+
+### Distribution
+
+```{r RQ2_Pre_Time_data_distribution, include = TRUE}
+
+# Distribution for response time
+hist(student_data$Pre_Time)
+hist(log(student_data$Pre_Time))
+
+student_data %>%
+  summarise(
+    Minimum = min(Pre_Time, na.rm = TRUE),
+    Median = median(Pre_Time, na.rm = TRUE),
+    Mean = mean(Pre_Time, na.rm = TRUE),
+    `Standard Deviation` = sd(Pre_Time, na.rm = TRUE),
+    `Count > 3*SD` = sum(Pre_Time > 3 * sd(Pre_Time), na.rm = TRUE)
+  )
+
+
+# Plot time distribution for correct and incorrect responses
+student_data_long <- student_data %>%
+  pivot_longer(cols = c(Pre_Time_Correct, Pre_Time_Incorrect),
+               names_to = "Category",
+               values_to = "Time")
+
+## Create density plot
+ggplot(student_data_long, aes(x = Time, fill = Category)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Pretest Times",
+       x = "Time",
+       y = "Density") +
+  scale_fill_manual(values = c("Pre_Time_Correct" = "green",
+                               "Pre_Time_Incorrect" = "red"),
+                    labels = c("Correct Responses",
+                               "Incorrect Responses")) +
+  theme_minimal()
+
+
+# Plot time distribution by Simplification
+ggplot(pretest_mean_data_if_simp, aes(x = Pre_Time, fill = Simplification)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Pretest Time by Simplification Option Presense",
+       x = "Mean Time",
+       y = "Density")
+
+# Plot time distribution by HOO_Position
+ggplot(pretest_mean_data_if_HOO, aes(x = Pre_Time, fill = HOO_Position)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Pretest Time by Higher-Order-Operator Position",
+       x = "Mean Time",
+       y = "Density")
+
+# Plot time distribution by cluster
+ggplot(student_data, aes(x = Pre_Time, fill = pre_cluster_groups)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Pretest Time by cluster",
+       x = "Mean Time",
+       y = "Density")
+
+# Plot time distribution by cluster for correct responses
+ggplot(student_data, aes(x = Pre_Time_Correct, fill = pre_cluster_groups)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Pretest Time for Correct responses by cluster",
+       x = "Mean Time",
+       y = "Density")
+
+```
+
+
+### Proposed analysis -- dunn test (non parametric for independent samples)
+
+#### Time across correct responses
+
+```{r comparison of time, echo = TRUE}
+
+student_data %>%
+  group_by (pre_cluster_groups) %>%
+  summarise(n = n())
+
+print("Students with at least one correct response")
+student_data %>%
+  filter(Pre_MP > 0) %>%
+  group_by (pre_cluster_groups) %>%
+  summarise(n = n())
+
+print("Pretest MP values")
+table(student_data$pre_cluster_groups, round(student_data$Pre_MP, 1))
+
+print("In correct responses")
+dunn.test(student_data$Pre_Time_Correct, g=student_data$pre_cluster_groups, method='bonferroni')
+
+# Create boxplot to visualize the difference
+ggplot(student_data, 
+       aes(x = pre_cluster_groups, y = Pre_Time_Correct, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "Response Time",
+       title = "Response Time in Correct Responses Comparison between hMP_lMA and hMP_mMA Groups") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+# Plots with mean and CI
+summary_data <- student_data %>%
+  group_by(pre_cluster_groups) %>%
+  summarise(mean_time = mean(Pre_Time_Correct, na.rm=TRUE),
+            se = sd(Pre_Time_Correct, na.rm=TRUE) / sqrt(n()),
+            ci_lower = mean_time - qt(0.975, df = n() - 1) * se,
+            ci_upper = mean_time + qt(0.975, df = n() - 1) * se)
+
+ggplot(summary_data, aes(x = pre_cluster_groups, y = mean_time, fill = pre_cluster_groups)) +
+  geom_col(alpha = 0.7, width = 0.5) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.2) +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "Mean Response Time",
+       title = "Mean Response Time with 95% CI (Correct Responses)") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+#library(pwr)
+#pwr.anova.test(k = number of groups, n = sample_size, f = effect_size, sig.level = sig_level)
+
+#print(result)
+
+```
+
+
+#### Time across all responses
+
+```{r RQ2_All_time_proposed, include = TRUE}
+
+## Time comparison
+
+print("In all responses")
+dunn.test(student_data$Pre_Time, g=student_data$pre_cluster_groups, method='bonferroni')
+  
+# Create boxplot to visualize the difference
+ggplot(student_data, 
+       aes(x = pre_cluster_groups, y = Pre_Time, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "Response Time",
+       title = "Response Time in All Responses Comparison between hMP_lMA and hMP_mMA Groups") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+# Plots with mean and CI
+summary_data <- student_data %>%
+  group_by(pre_cluster_groups) %>%
+  summarise(mean_time = mean(Pre_Time, na.rm=TRUE),
+            se = sd(Pre_Time, na.rm=TRUE) / sqrt(n()),
+            ci_lower = mean_time - qt(0.975, df = n() - 1) * se,
+            ci_upper = mean_time + qt(0.975, df = n() - 1) * se)
+
+ggplot(summary_data, aes(x = pre_cluster_groups, y = mean_time, fill = pre_cluster_groups)) +
+  geom_col(alpha = 0.7, width = 0.5) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.2) +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "Mean Response Time",
+       title = "Mean Response Time with 95% CI (All Responses)") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+```
+
+
+### Updated analysis -- linear models
+
+#### Time across correct reponses
+
+```{r RQ2_Correct_time_linear, include = TRUE}
+
+# Modeling with lm()
+model <- lm(log(Pre_Time_Correct) ~ scale(MA) * scale(Pre_MP), data = student_data)
+summary(model)
+shapiro.test(resid(model))
+bptest(model) # if p > 0.05 -- no strong evidence of heteroscedasticity (OLS is okay)
+
+# Plotting by continuous
+ggplot(student_data, aes(x = MA, y = Pre_Time_Correct, color = MP_level)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95, alpha = 0.3) +
+  geom_jitter() +
+  labs(x = "MA", 
+       y = "Pre_Time_Correct",
+       color = "MP_level") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+#### Time across all reponses
+
+```{r RQ2_All_time_linear, include = TRUE}
+
+# Modeling with lm()
+model <- lm(log(Pre_Time) ~ scale(MA) * scale(Pre_MP), data = student_data)
+summary(model)
+shapiro.test(resid(model))
+bptest(model) # if p > 0.05 -- no strong evidence of heteroscedasticity (OLS is okay)
+
+# Modeling with lm_robust()
+model_robust <- lm_robust(log(Pre_Time) ~ scale(MA) * scale(Pre_MP), data = student_data)
+summary(model_robust)
+
+# Plotting by continuous
+ggplot(student_data, aes(x = MA, y = Pre_Time , color = MP_level)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95, alpha = 0.3) +
+  geom_jitter() +
+  #facet_wrap(~Image) +
+  labs(x = "MA", 
+       y = "Pre_Time",
+       color = "MP_level") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+#### Problem-level: time across correct reponses
+
+```{r RQ2_Correct_time_linear_problem_level, include = TRUE}
+
+pretes_problem_level <- problem_level_math_student_data %>% filter (grepl("^P", Image))
+pretes_problem_level_correct <- pretes_problem_level %>% filter (Correct == "TRUE")
+
+
+# Modeling with HLM
+model <- lmer(log(trialElapsedTime) ~ scale(MA) * scale(Pre_MP) + (1|Image) + (1|problem_Order) + (1|pid), data = pretes_problem_level_correct)
+summary(model)
+shapiro.test(resid(model))
+
+# Plotting by continuous
+ggplot(pretes_problem_level_correct, aes(x = Pre_MP, y = trialElapsedTime , color = MA_level, alpha = 0.7)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95) +
+  geom_jitter() +
+  facet_wrap(~Image) +
+  labs(x = "Pre_MP", 
+       y = "Time",
+       color = "MA_level") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+#### Problem-level: time across all reponses
+
+```{r RQ2_All_time_linear_problem_level, include = TRUE}
+
+pretes_problem_level <- problem_level_math_student_data %>% filter (grepl("^P", Image))
+
+# Modeling with HLM
+model <- lmer(log(trialElapsedTime) ~ scale(MA) * scale(Pre_MP) + (1|Image) + (1|problem_Order) + (1|pid), data = pretes_problem_level)
+summary(model)
+shapiro.test(resid(model))
+
+```
+
+## Eye gaze data
+
+```{r RQ2_AOIs_uploadding_data, include = FALSE}
+setwd("~/Documents/Data_Analysis/Eye_tracking_fractions/Code/Output_files")
+
+# Read the data with explicit column types
+AOI_problem_data_full <- read_csv("AOI_hits_combined.csv") # problem-level data with hits per each AOI
+
+setwd("~/Documents/Data_Analysis/Eye_tracking_fractions/Code/Analysis")
+
+# Keeping only participants that we kept after math data cleaning
+problem_level_pretest_trials <- math_data %>% select (pid, Image, Test, Condition)
+AOI_problem_data_full <- merge(AOI_problem_data_full, problem_level_pretest_trials, by = c("pid", "Image"), suffixes = c("", "_drop"))
+AOI_problem_data_full <- AOI_problem_data_full[, !grepl("_drop$", names(AOI_problem_data_full))]
+```
+
+### Group-level AOIs and proportions
+
+```{r RQ2_AOIs_group_AOIs_group, include = F}
+
+# Add averaged AOIs by AOI group
+AOI_problem_data_full <- AOI_problem_data_full %>%
+  mutate(
+    # Add combined AOI columns for Total Hits
+    Total_Problem_AOIs = Total_Hits_H_D1 + Total_Hits_H_D2 + Total_Hits_H_N1 + 
+                  Total_Hits_H_N2 + Total_Hits_H_O + Total_Hits_L_D1 + 
+                  Total_Hits_L_N1 + Total_Hits_L_O,
+    Total_Response_AOIs = Total_Hits_R_D + Total_Hits_R_N,
+    Total_Full_response_AOIs = Total_Hits_R_D + Total_Hits_R_N + Total_Hits_Button,
+    # Add combined AOI columns for New Hits
+    New_Problem_AOIs = New_Hits_H_D1 + New_Hits_H_D2 + New_Hits_H_N1 + 
+                      New_Hits_H_N2 + New_Hits_H_O + New_Hits_L_D1 + 
+                      New_Hits_L_N1 + New_Hits_L_O,
+    New_Response_AOIs = New_Hits_R_D + New_Hits_R_N,
+    New_Full_response_AOIs = New_Hits_R_D + New_Hits_R_N + New_Hits_Button)
+
+### Calculate proportions including missing count value (outside of screen proportion)
+AOI_problem_data_full <- AOI_problem_data_full %>% 
+  mutate(Total_Hits_Outside_of_Screen_prop = Total_Hits_Outside_of_Screen / Total_AOI_Hits_All,
+         Total_Problem_AOIs_prop = Total_Problem_AOIs / Total_AOI_Hits_All,
+         Total_Response_AOIs_prop = Total_Response_AOIs / Total_AOI_Hits_All,
+         Total_Full_response_AOIs_prop = Total_Full_response_AOIs / Total_AOI_Hits_All,
+         Total_Hits_Timer_prop = Total_Hits_Timer / Total_AOI_Hits_All,
+         Total_Hits_Outside_of_AOIs_prop = Total_Hits_Outside_of_AOIs / Total_AOI_Hits_All,
+         New_Problem_AOIs_prop = New_Problem_AOIs / Total_AOI_Hits_All,
+         New_Response_AOIs_prop = New_Response_AOIs / Total_AOI_Hits_All,
+         New_Hits_Timer_prop = New_Hits_Timer / Total_AOI_Hits_All
+         )
+
+```
+
+
+
+```{r RQ2_AOIs_cleaning_data, include = FALSE}
+
+## -- -- -- -- -- -- -- -- -- -- -- --
+## Cleaning AOI data: pretest
+## -- -- -- -- -- -- -- -- -- -- -- --
+
+### Df for pretest
+AOI_problem_data_full_pretest <- AOI_problem_data_full %>% filter (Test == "Pretest")
+
+# Cleaning trials with out of screen gaze counts < 70 %
+
+## -- Problem-level investigation for pretest -- ##
+
+### How many problems had how many gazes outside of screen?
+table(round(AOI_problem_data_full_pretest$Total_Hits_Outside_of_Screen_prop, 1))
+
+## -- Student-level cleaning -- ##
+
+### Detect students whose gaze data was missed in at least half of pretest
+students_with_half_outside_screen <- AOI_problem_data_full_pretest %>% 
+  filter(Total_Hits_Outside_of_Screen_prop > 0.5) %>% 
+  group_by(pid, Condition) %>%
+  summarise (n = n()) %>%
+  filter (n>5)
+
+### Exclude them
+AOI_problem_data <- AOI_problem_data_full %>% 
+  filter (!pid %in% students_with_half_outside_screen$pid)
+
+### Checking who stayed 
+#AOI_problem_data %>% filter (grepl("^P", Image)) %>% 
+#  group_by(pid) %>%
+#  summarise (Total_Hits_Outside_of_Screen_prop_mean = mean(Total_Hits_Outside_of_Screen_prop)) 
+
+### Delete with only zeros in most AOIs:
+# wpi6p17b29773735995 -- only had non 0s in two AOIs (H_D1, H_D2) - many correct
+# wpi61e74071347v6471 -- only had non 0s on one AOI  - many correct
+# wpi61i7z33955583506 -- only had non 0s in two AOIs (H_D1, H_D2) - many correct (already excluded)
+# wpi617m3326052i0740 -- only had non 0s in two AOIs (H_N1, L_N1) - many correct
+# wpi6173o073186z1469 -- all 0s - some correct
+# wpi61v729990s628152 -- all 0s - all correct
+
+AOI_problem_data <- AOI_problem_data %>%  
+  group_by(pid) %>%
+  filter (!pid %in% c("wpi6p17b29773735995", "wpi61e74071347v6471", 
+                      "wpi61i7z33955583506", "wpi617m3326052i0740", 
+                      "wpi6173o073186z1469", "wpi61v729990s628152"))
+
+# How many outside_of_screen > 0.5 in each condition
+AOI_problem_data %>%
+    filter ( (grepl("^P", Image) & Total_Hits_Outside_of_Screen_prop > 0.5)) %>%
+  group_by (Condition) %>%
+  summarise(n = n())
+
+## -- Problem-level cleaning -- ##
+AOI_problem_data <- AOI_problem_data %>%
+    filter ( (grepl("^P", Image) & Total_Hits_Outside_of_Screen_prop <= 0.5) | (!grepl("^P", Image)) )
+
+# Combining with problem response data (e.g., performance, anxiety, response time)
+AOI_problem_data <- merge(AOI_problem_data, math_data, by = c("pid", "Image"), suffixes = c("", "_drop"))
+AOI_problem_data <- AOI_problem_data[, !grepl("_drop$", names(AOI_problem_data))]
+```
+
+
+```{r RQ2_AOIs_clean_exp, include = F}
+
+## -- -- -- -- -- -- -- -- -- -- -- --
+## Cleaning AOI data: experiment
+## -- -- -- -- -- -- -- -- -- -- -- --
+
+# Cleaning trials with out of screen gaze counts < 70 %
+
+## -- Prepare for investigation -- ##
+
+### Df for pretest
+AOI_problem_data_exp <- AOI_problem_data %>% filter (!grepl("^P", Image))
+
+# Excluding participants that were excluded from experiment math dataset
+AOI_problem_data_exp <- AOI_problem_data_exp %>% filter ( pid %in% experiment_data$pid )
+
+## -- Problem-level investigation -- ##
+
+### How many problems had how many gazes outside of screen?
+table(round(AOI_problem_data_exp$Total_Hits_Outside_of_Screen_prop, 1))
+
+## -- Student-level investigation and cleaning -- ##
+
+### Detect students whose gaze data was missed in at least half of pretest
+students_with_half_outside_screen <- AOI_problem_data_exp %>% 
+  filter(Total_Hits_Outside_of_Screen_prop > 0.5) %>% 
+  group_by(pid, Condition) %>%
+  summarise (n = n()) %>%
+  filter (n>5)
+
+### Delete them
+AOI_problem_data_exp <- AOI_problem_data_exp %>% 
+  filter (!pid %in% students_with_half_outside_screen$pid)
+
+### How many missing values participants still have
+AOI_problem_data_exp %>% 
+  filter(Total_Hits_Outside_of_Screen_prop > 0.5) %>% 
+  group_by(Condition) %>%
+  summarise (n = n())
+
+### Checking who stayed 
+#AOI_problem_data_exp %>% filter (!grepl("^P", Image)) 
+
+## -- Problem-level cleaning -- ##
+AOI_problem_data_exp <- AOI_problem_data_exp %>% 
+    filter (Total_Hits_Outside_of_Screen_prop <= 0.5) 
+
+### Checking 0s
+AOI_problem_data %>% filter (!grepl("^P", Image)) %>% 
+  group_by(pid) %>%
+  summarise (Total_Hits_H_D1_mean = round(mean(Total_Hits_H_D1), 0),
+             Total_Hits_H_D2_mean = round(mean(Total_Hits_H_D2), 0),
+             Total_Hits_H_N1_mean = round(mean(Total_Hits_H_N1), 0),
+             Total_Hits_H_N2_mean = round(mean(Total_Hits_H_N2), 0),
+             Total_Hits_R_D_mean = round(mean(Total_Hits_R_D), 0),
+             Total_Hits_R_N_mean = round(mean(Total_Hits_R_N), 0) ) 
+
+# Combining with problem response data (e.g., performance, anxiety, response time)
+AOI_problem_data_exp <- merge(AOI_problem_data_exp, math_data, by = c("pid", "Image"), suffixes = c("", "_drop"))
+AOI_problem_data_exp <- AOI_problem_data_exp[, !grepl("_drop$", names(AOI_problem_data_exp))]
+
+```
+
+
+### Problem-level pretest distributions
+
+```{r AOI_distribution, include=F}
+
+AOI_problem_data_pretest <- AOI_problem_data %>% filter (grepl("^P", Image))
+
+# Stats for AOIs
+
+## Define the columns of interest
+aoi_group_columns <- c( "Total_Problem_AOIs", "Total_Response_AOIs", "Total_Full_response_AOIs", 
+                  "Total_Hits_Timer", "Total_Hits_Instruction", 
+                  "Total_Hits_Outside_of_AOIs", "Total_Hits_Outside_of_Screen", 
+                  "New_Problem_AOIs", "New_Response_AOIs", "New_Full_response_AOIs", "New_Hits_Timer",
+                  "Numerator_Denominator_Transitions", 
+                  "Total_Hits_Outside_of_Screen_prop", "Total_Problem_AOIs_prop",
+                  "Total_Response_AOIs_prop", "Total_Full_response_AOIs_prop",
+                  "Total_Hits_Timer_prop", "Total_Hits_Outside_of_AOIs_prop",
+                  "New_Problem_AOIs_prop", "New_Response_AOIs_prop", "New_Hits_Timer_prop"
+                  )
+
+## Pivot the data to a longer format
+long_data <- AOI_problem_data_pretest %>%
+  pivot_longer(cols = all_of(aoi_group_columns), names_to = "Variable", values_to = "Value")
+
+## Compute summary statistics for each variable
+long_data %>%
+  group_by(Variable) %>%
+  summarise(
+    Minimum = min(Value, na.rm = TRUE),
+    Mean = mean(Value, na.rm = TRUE),
+    Maximum = max(Value, na.rm = TRUE),
+    `Standard Deviation` = sd(Value, na.rm = TRUE),
+    `Count > 3*SD` = sum(Value > 3 * sd(Value, na.rm = TRUE), na.rm = TRUE)
+  )
+
+```
+
+### Student-level
+
+```{r RQ2_AOIs_student_level_pretest_data, include = F}
+
+## -- -- -- -- -- -- -- -- -- -- -- --
+##    Making student-level data
+## -- -- -- -- -- -- -- -- -- -- -- -- 
+
+## Function to calculate mean AOI values
+calculate_mean_aoi <- function(data, columns, correctness_condition = NULL, suffix = "") {
+  # Filter data if correctness_condition is provided
+  if (!is.null(correctness_condition)) {
+    data <- data[data$Correct == correctness_condition, ]
+  }
+  
+  # Group by participant and calculate means
+  result <- data %>%
+    group_by(pid) %>%
+    summarise(across(all_of(aoi_group_columns), 
+                     ~mean(.x, na.rm = TRUE),
+                     .names = "{.col}{suffix}"))
+  return(result)
+}
+
+## Calculate overall means
+AOI_student_data_pretest <- calculate_mean_aoi(
+  data = AOI_problem_data_pretest,
+  columns = aoi_group_columns,
+  suffix = "_Pretest"
+)
+
+## Calculate means for correct responses
+pretest_mean_AOI_correct <- calculate_mean_aoi(
+  data = AOI_problem_data_pretest,
+  columns = aoi_group_columns,
+  correctness_condition = "TRUE",
+  suffix = "_Correct_Pretest"
+)
+
+## Calculate means for incorrect responses
+pretest_mean_AOI_incorrect <- calculate_mean_aoi(
+  data = AOI_problem_data_pretest,
+  columns = aoi_group_columns,
+  correctness_condition = "FALSE",
+  suffix = "_Incorrect_Pretest"
+)
+
+# Combine all data
+AOI_student_data_pretest <- AOI_student_data_pretest %>%
+  merge(pretest_mean_AOI_correct, by = "pid", all.x = TRUE) %>%
+  merge(pretest_mean_AOI_incorrect, by = "pid", all.x = TRUE) %>%
+  merge(student_data, by = "pid", all.x = TRUE)
+
+```
+
+```{r problem_level_data_with_demo_AOI_data, include=FALSE}
+
+## -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+##   Adding student-level data to problem-level
+## -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+
+problem_level_AOI_math_data <- merge(math_data, AOI_problem_data, by = c("pid", "Image"), suffixes = c("", "_drop"))
+problem_level_AOI_math_data <- problem_level_AOI_math_data[, !grepl("_drop$", names(problem_level_AOI_math_data))]
+
+problem_level_AOI_math_student_data <- merge(problem_level_AOI_math_data, student_data, by = c("pid"), suffixes = c("", "_drop"), all.x = TRUE)
+problem_level_AOI_math_student_data <- problem_level_AOI_math_student_data[, !grepl("_drop$", names(problem_level_AOI_math_student_data))]
+
+
+```
+
+#### Statistics for correct responses
+
+```{r RQ2_AOIs_filtering, echo=FALSE}
+
+# Separate sums of Total Hits
+student_total_average <- AOI_student_data_pretest %>%
+  select (pid, Total_Hits_Outside_of_Screen_prop_Correct_Pretest, Total_Problem_AOIs_prop_Correct_Pretest, 
+         Total_Response_AOIs_prop_Correct_Pretest, 
+         Total_Hits_Timer_prop_Correct_Pretest)
+
+# Separate sums of New Hits
+student_new_average <- AOI_student_data_pretest %>%
+  select (pid, New_Problem_AOIs_Correct_Pretest, New_Response_AOIs_Correct_Pretest, 
+         Numerator_Denominator_Transitions_Correct_Pretest) 
+
+# Create summary statistics for student-level pretest correct AOI data
+student_summary_stats <- bind_rows(
+  # For Total Hits
+  student_total_average %>%
+    select(-pid) %>%  
+    summarise(across(everything(), list(
+      NAs = ~mean(is.na(.)),
+      min = ~min(., na.rm = TRUE),
+      mean = ~mean(., na.rm = TRUE),
+      sd = ~sd(., na.rm = TRUE),
+      median = ~median(., na.rm = TRUE),
+      max = ~max(., na.rm = TRUE),
+      zeros = ~sum(. == 0, na.rm = TRUE) / n()
+    ))) %>%
+    pivot_longer(everything(), 
+                names_to = c("AOI", "Stat"), 
+                names_pattern = "(.*)_(.*)") %>%
+    mutate(Type = "Total_"),
+  
+  # For New Hits
+  student_new_average %>%
+    select(-pid) %>%  
+    summarise(across(everything(), list(
+      NAs = ~mean(is.na(.)),
+      min = ~min(., na.rm = TRUE),
+      mean = ~mean(., na.rm = TRUE),
+      sd = ~sd(., na.rm = TRUE),
+      median = ~median(., na.rm = TRUE),
+      max = ~max(., na.rm = TRUE),
+      zeros = ~sum(. == 0, na.rm = TRUE) / n()
+    ))) %>%
+    pivot_longer(everything(), 
+                names_to = c("AOI", "Stat"), 
+                names_pattern = "(.*)_(.*)") %>%
+    mutate(Type = "New_")
+) %>%
+  pivot_wider(names_from = Stat, values_from = value)
+
+# Display summary statistics in a clean format
+knitr::kable(student_summary_stats, 
+             digits = 2,
+             caption = "Summary Statistics for AOI Hits") %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+```
+
+#### Distributions for correct responses
+
+```{r RQ2_AOIs_pretest_cor_distributions, echo=FALSE}
+
+# Select relevant columns for total and new hits
+selected_data_total <- AOI_student_data_pretest %>% 
+  select(Total_Hits_Outside_of_Screen_prop_Correct_Pretest, Total_Problem_AOIs_prop_Correct_Pretest, 
+         Total_Response_AOIs_prop_Correct_Pretest, 
+         Total_Hits_Timer_prop_Correct_Pretest)
+
+selected_data_new <- AOI_student_data_pretest %>% 
+  select(New_Problem_AOIs_Correct_Pretest, New_Response_AOIs_Correct_Pretest, 
+         Numerator_Denominator_Transitions_Correct_Pretest)
+
+# Data for plot for Total Hits
+melted_data_total <- selected_data_total %>%
+  pivot_longer(everything(),
+               names_to = "AOI", 
+               values_to = "Hits")
+
+# Data for plot for New Hits
+melted_data_new <- selected_data_new %>%
+  pivot_longer(everything(),
+               names_to = "AOI", 
+               values_to = "Hits")
+
+# Plot for Total Hits
+ggplot(melted_data_total, aes(x = Hits)) +
+  geom_histogram(binwidth = function(x) diff(range(x))/30, 
+                fill = '#69b3a2', 
+                color = 'white', 
+                alpha = 0.7) +
+  facet_wrap(~ AOI, scales = 'free', ncol = 3) +
+  labs(title = 'Distribution of Total Hits Across AOIs',
+       x = 'Number of Hits',
+       y = 'Frequency') +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 8),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Plot for New Hits
+ggplot(melted_data_new, aes(x = Hits)) +
+  geom_histogram(binwidth = function(x) diff(range(x))/30, 
+                fill = '#404080', 
+                color = 'white', 
+                alpha = 0.7) +
+  facet_wrap(~ AOI, scales = 'free', ncol = 3) +
+  labs(title = 'Distribution of New Hits Across AOIs',
+       x = 'Number of Hits',
+       y = 'Frequency') +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 8),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+```
+
+#### Logged distributions
+
+```{r RQ2_AOIs_distribution_plots_by_student_log, echo=FALSE}
+
+# Plot for Total Hits
+ggplot(melted_data_total, aes(x = log(Hits))) +
+  geom_histogram(binwidth = function(x) diff(range(x))/30, 
+                fill = '#69b3a2', 
+                color = 'white', 
+                alpha = 0.7) +
+  facet_wrap(~ AOI, scales = 'free', ncol = 3) +
+  labs(title = 'Distribution of Total Hits Across AOIs',
+       x = 'Number of Hits',
+       y = 'Frequency') +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 8),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Plot for New Hits
+ggplot(melted_data_new, aes(x = log(Hits))) +
+  geom_histogram(binwidth = function(x) diff(range(x))/30, 
+                fill = '#404080', 
+                color = 'white', 
+                alpha = 0.7) +
+  facet_wrap(~ AOI, scales = 'free', ncol = 3) +
+  labs(title = 'Distribution of New Hits Across AOIs',
+       x = 'Number of Hits',
+       y = 'Frequency') +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 8),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+```
+
+
+### Proposed analysis -- dunn.test
+
+#### Correct responses
+
+```{r RQ2_AOIs_proposed_analyzing_dunn, include=TRUE}
+
+# Combine all data
+AOI_student_data_pretest_correct <- pretest_mean_AOI_correct %>%
+  merge(student_data, by = "pid", all.x = TRUE, suffixes = c("", "_drop"))
+AOI_student_data_pretest_correct <- AOI_student_data_pretest_correct[, !grepl("_drop$", names(AOI_student_data_pretest_correct))]
+
+print ("all participants")
+AOI_student_data_pretest %>%
+  group_by (pre_cluster_groups) %>%
+  summarise(n = n())
+
+print ("participants with correct responses")
+AOI_student_data_pretest_correct %>%
+  group_by (pre_cluster_groups) %>%
+  summarise(n = n())
+
+aoi_group_columns_correct_pretest <- c("Total_Problem_AOIs_prop_Correct_Pretest",   
+              "Total_Response_AOIs_prop_Correct_Pretest", 
+              "Total_Hits_Timer_prop_Correct_Pretest",
+              "New_Problem_AOIs_Correct_Pretest", "New_Response_AOIs_Correct_Pretest",
+              "Numerator_Denominator_Transitions_Correct_Pretest", 
+              "Total_Hits_Outside_of_Screen_prop_Correct_Pretest")
+
+# Function to run Dunn test and return tidy results
+run_dunn <- function(outcome_var, data, group_var) {
+  
+    # Create boxplot for Total Problem counts
+  
+  dunn_result <- dunn.test(data[[outcome_var]], 
+                          data[[group_var]], 
+                          method = "bonferroni",
+                          kw = TRUE,
+                          table = TRUE)
+  
+  # Convert results to data frame
+  data.frame(
+    outcome = outcome_var,
+    comparison = paste(dunn_result$comparisons),
+    Z = dunn_result$Z,
+    P = dunn_result$P,
+    P.adjusted = dunn_result$P.adjusted
+  )
+}
+
+# Run all tests and combine results
+all_dunn_tests <- map_df(aoi_group_columns_correct_pretest, ~run_dunn(.x, data = AOI_student_data_pretest_correct, group_var = "pre_cluster_groups"))
+
+# View results in nice format
+all_dunn_tests %>%
+  arrange(outcome, P.adjusted) %>%
+  mutate(across(c(Z, P, P.adjusted), ~round(., 4))) %>%
+  knitr::kable()
+
+# Create boxplot for Total Problem counts
+ggplot(AOI_student_data_pretest_correct, 
+       aes(x = pre_cluster_groups, y = Total_Problem_AOIs_Correct_Pretest, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "Total_Problem_AOIs_Correct_Pretest",
+       title = "Total_Problem_AOIs_Correct_Pretest Comparison") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+# Create boxplot for Numerator_Denominator_Transitions_Correct_Pretest 
+ggplot(AOI_student_data_pretest_correct, 
+       aes(x = pre_cluster_groups, y = Numerator_Denominator_Transitions_Correct_Pretest, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "Numerator_Denominator_Transitions_Correct_Pretest",
+       title = "Numerator_Denominator_Transitions_Correct_Pretest Comparison") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+# Create boxplot for Total_Hits_Timer_prop_Correct_Pretest 
+ggplot(AOI_student_data_pretest_correct, 
+       aes(x = pre_cluster_groups, y = Total_Hits_Timer_prop_Correct_Pretest, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "Time_Prop_Correct_Pretest",
+       title = "Time_Prop_Correct_Pretest Comparison") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+```
+
+```{r RQ2_AOIs_proposed_all_vis_between clusters, include=TRUE}
+aoi_group_columns_correct_pretest_common_plot <- c("Total_Problem_AOIs_prop_Correct_Pretest",   
+              "Total_Response_AOIs_prop_Correct_Pretest", 
+              "Total_Hits_Timer_prop_Correct_Pretest",
+              "New_Problem_AOIs_Correct_Pretest", "New_Response_AOIs_Correct_Pretest",
+              "Numerator_Denominator_Transitions_Correct_Pretest")
+
+# Create visualization
+# Reshape data for plotting
+long_AOI_student_data_pretest_correct <- AOI_student_data_pretest_correct %>%
+ # filter(pre_cluster_groups %in% c("hMP_lMA", "hMP_mMA")) %>%
+  pivot_longer(cols = all_of(aoi_group_columns_correct_pretest_common_plot),
+               names_to = "Variable",
+               values_to = "Value")
+
+# Create boxplots with individual points
+ggplot(long_AOI_student_data_pretest_correct, aes(x = pre_cluster_groups, y = Value, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  facet_wrap(~Variable, scales = "free_y") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none") +
+  labs(x = "Group",
+       y = "Value",
+       title = "Comparison of Eye-tracking Measures between Groups",
+       subtitle = "Aggregated by student") +
+  scale_fill_brewer(palette = "Set2")
+
+```
+
+#### All responses
+
+```{r RQ2_AOIs_proposed_analyzing_dunn_all_resp, include=TRUE}
+
+aoi_group_columns_pretest <- c("Total_Problem_AOIs_prop_Pretest",   
+              "Total_Response_AOIs_prop_Pretest", 
+              "Total_Hits_Timer_prop_Pretest",
+              "New_Problem_AOIs_Pretest", "New_Response_AOIs_Pretest",
+              "Numerator_Denominator_Transitions_Pretest", 
+              "Total_Hits_Outside_of_Screen_prop_Pretest")
+
+# Function to run Dunn test and return tidy results
+run_dunn <- function(outcome_var, data, group_var) {
+  
+    # Create boxplot for Total Problem counts
+  
+  dunn_result <- dunn.test(data[[outcome_var]], 
+                          data[[group_var]], 
+                          method = "bonferroni",
+                          kw = TRUE,
+                          table = TRUE)
+  
+  # Convert results to data frame
+  data.frame(
+    outcome = outcome_var,
+    comparison = paste(dunn_result$comparisons),
+    Z = dunn_result$Z,
+    P = dunn_result$P,
+    P.adjusted = dunn_result$P.adjusted
+  )
+}
+
+# Run all tests and combine results
+all_dunn_tests <- map_df(aoi_group_columns_pretest, ~run_dunn(.x, data = AOI_student_data_pretest, group_var = "pre_cluster_groups"))
+
+# View results in nice format
+all_dunn_tests %>%
+  arrange(outcome, P.adjusted) %>%
+  mutate(across(c(Z, P, P.adjusted), ~round(., 4))) %>%
+  knitr::kable()
+
+# Create boxplot for Numerator_Denominator_Transitions_Correct_Pretest 
+ggplot(AOI_student_data_pretest, 
+       aes(x = pre_cluster_groups, y = Numerator_Denominator_Transitions_Pretest, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "Numerator_Denominator_Transitions_Pretest",
+       title = "Numerator_Denominator_Transitions_Pretest Comparison") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+# Create boxplot for Total Problem counts
+ggplot(AOI_student_data_pretest, 
+       aes(x = pre_cluster_groups, y = New_Problem_AOIs_Pretest, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "New_Problem_AOIs_Pretest",
+       title = "New_Problem_AOIs_Pretest Comparison") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+# Create boxplot for Total_Hits_Timer_prop_Correct_Pretest 
+ggplot(AOI_student_data_pretest, 
+       aes(x = pre_cluster_groups, y = Total_Hits_Timer_prop_Pretest, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "Time_Prop_Pretest",
+       title = "Time_Prop_Pretest Comparison") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+```
+
+```{r RQ2_AOIs_proposed_all_vis_between hMP_lMA and hMP_hMA, include=TRUE}
+aoi_group_columns_pretest_common_plot <- c("Total_Problem_AOIs_prop_Pretest",   
+              "Total_Response_AOIs_prop_Pretest", 
+              "Total_Hits_Timer_prop_Pretest",
+              "New_Problem_AOIs_Pretest", "New_Response_AOIs_Pretest",
+              "Numerator_Denominator_Transitions_Pretest")
+
+# Create visualization
+# Reshape data for plotting
+long_AOI_student_data_pretest <- AOI_student_data_pretest %>%
+ # filter(pre_cluster_groups %in% c("hMP_lMA", "hMP_mMA")) %>%
+  pivot_longer(cols = all_of(aoi_group_columns_pretest_common_plot),
+               names_to = "Variable",
+               values_to = "Value")
+
+# Create boxplots with individual points
+ggplot(long_AOI_student_data_pretest, aes(x = pre_cluster_groups, y = Value, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  facet_wrap(~Variable, scales = "free_y") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none") +
+  labs(x = "Group",
+       y = "Value",
+       title = "Comparison of Eye-tracking Measures between Groups",
+       subtitle = "Aggregated by student") +
+  scale_fill_brewer(palette = "Set2")
+
+```
+
+
+### Updated analysis methods
+
+```{r RQ2_AOIs_analyzing_data_lm, include=TRUE, warning=FALSE, message=FALSE}
+
+# Create empty dataframe for storing results
+model_summaries <- data.frame()
+
+for(dv in aoi_group_columns_correct_pretest) {
+  # Fit model
+   formula <- as.formula(paste0("log(", dv, ") ~ scale(MA) * scale(Pre_MP)"))
+  
+  model <- lm(
+    formula,
+    data = AOI_student_data_pretest_correct
+  )
+  
+  # Shapiro-Wilk test for normality
+  shapiro_test <- shapiro.test(resid(model))
+  print(paste("Shapiro-Wilk test for", dv, ": W =", round(shapiro_test$statistic, 3), 
+              "p =", format.pval(shapiro_test$p.value, digits = 3)))
+  bptest(model) # if p > 0.05 -- no strong evidence of heteroscedasticity (OLS is okay)
+ 
+  
+  # Get model summary
+  sum_model <- summary(model)
+  
+  # Extract fixed effects
+  fixed_effects <- sum_model$coefficient
+  
+  # Get standardized effect sizes
+  beta <- standardize_parameters(model)
+  
+  # Add to summary dataframe
+  temp_df <- data.frame(
+    DV = dv,
+    Predictor = rownames(fixed_effects),
+    Estimate = round(fixed_effects[,"Estimate"], 3),
+    SE = round(fixed_effects[,"Std. Error"], 3),
+    t_value = round(fixed_effects[,"t value"], 3),
+    p_value = fixed_effects[,"Pr(>|t|)"],
+    Std_Beta = round(beta$Std_Coefficient, 3)
+  )
+  
+  model_summaries <- rbind(model_summaries, temp_df)
+}
+
+# Format results
+model_summaries <- model_summaries %>%
+  mutate(
+    p_value = format.pval(p_value, digits = 3),
+    Significant = ifelse(as.numeric(p_value) < 0.05, "*", "")
+  )
+
+# Display formatted table
+kable(model_summaries,
+      caption = "Summary of Gaussian Models with log()",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+# Plotting by continuous
+ggplot(AOI_student_data_pretest_correct, 
+       aes(x = Pre_MP, 
+           y = Numerator_Denominator_Transitions_Correct_Pretest , 
+           color = MA_level)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95, alpha = 0.3) +
+  geom_jitter() +
+  labs(x = "Pre_MP", 
+       y = "Numerator_Denominator_Transitions_Correct_Pretest",
+       color = "MA_level") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Plotting by continuous
+ggplot(AOI_student_data_pretest_correct, 
+       aes(x = Pre_MP, 
+           y = New_Problem_AOIs_Correct_Pretest , 
+           color = MA_level)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95, alpha = 0.3) +
+  geom_jitter(alpha = 0.5) +
+  labs(x = "Pre_MP", 
+       y = "New_Problem_AOIs_Correct_Pretest",
+       color = "MA_level") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+
+
+```
+
+```{r RQ2_AOIs_analyzing_data_lm_robust, include=TRUE, warning=FALSE, message=FALSE}
+
+aoi_cols_non_normal <- c(   
+              "Total_Response_AOIs_prop_Correct_Pretest", 
+              "Total_Hits_Timer_prop_Correct_Pretest",
+              "New_Response_AOIs_Correct_Pretest")
+
+# Create empty dataframe for storing results
+model_summaries <- data.frame()
+
+for(dv in aoi_cols_non_normal) {
+  # Fit model
+   formula <- as.formula(paste0("log(", dv, ") ~ scale(MA) * scale(Pre_MP)"))
+
+  model <- lm_robust(
+    formula,
+    data = AOI_student_data_pretest_correct
+  )
+
+  # Get model summary
+  sum_model <- summary(model)
+  
+  # Extract fixed effects
+  fixed_effects <- sum_model$coefficients
+  
+  # Get standardized effect sizes
+  beta <- standardize_parameters(model)
+  
+  # Add to summary dataframe
+  temp_df <- data.frame(
+    DV = dv,
+    Predictor = rownames(fixed_effects),
+    Estimate = round(fixed_effects[,"Estimate"], 3),
+    SE = round(fixed_effects[,"Std. Error"], 3),
+    z_value = round(fixed_effects[,"t value"], 3),
+    p_value = fixed_effects[,"Pr(>|t|)"],
+    Std_Beta = round(beta$Std_Coefficient, 3)
+  )
+  
+  model_summaries <- rbind(model_summaries, temp_df)
+}
+
+# Format results
+model_summaries <- model_summaries %>%
+  mutate(
+    p_value = format.pval(p_value, digits = 3),
+    Significant = ifelse(as.numeric(p_value) < 0.05, "*", "")
+  )
+
+# Display formatted table
+kable(model_summaries,
+      caption = "Summary of Robust Linear Models with log()",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+```
+
+#### All responses
+
+```{r RQ2_AOIs_analyzing_data_lm_all_resp, message=FALSE, warning=FALSE, include=TRUE}
+
+aoi_group_columns_pretest <- c("Total_Problem_AOIs_prop_Pretest",   
+              "Total_Response_AOIs_prop_Pretest", 
+              "Total_Hits_Timer_prop_Pretest",
+              "New_Problem_AOIs_Pretest", "New_Response_AOIs_Pretest",
+              "Numerator_Denominator_Transitions_Pretest", 
+              "Total_Hits_Outside_of_Screen_prop_Pretest")
+
+# Create empty dataframe for storing results
+model_summaries <- data.frame()
+
+for(dv in aoi_group_columns_pretest) {
+  # Fit model
+   formula <- as.formula(paste0("log(", dv, ") ~ scale(MA) * scale(Pre_MP)"))
+  
+  model <- lm(
+    formula,
+    data = AOI_student_data_pretest
+  )
+  
+  # Shapiro-Wilk test for normality
+  shapiro_test <- shapiro.test(resid(model))
+  print(paste("Shapiro-Wilk test for", dv, ": W =", round(shapiro_test$statistic, 3), 
+              "p =", format.pval(shapiro_test$p.value, digits = 3)))
+  bptest(model) # if p > 0.05 -- no strong evidence of heteroscedasticity (OLS is okay)
+ 
+  
+  # Get model summary
+  sum_model <- summary(model)
+  
+  # Extract fixed effects
+  fixed_effects <- sum_model$coefficient
+  
+  # Get standardized effect sizes
+  beta <- standardize_parameters(model)
+  
+  # Add to summary dataframe
+  temp_df <- data.frame(
+    DV = dv,
+    Predictor = rownames(fixed_effects),
+    Estimate = round(fixed_effects[,"Estimate"], 3),
+    SE = round(fixed_effects[,"Std. Error"], 3),
+    t_value = round(fixed_effects[,"t value"], 3),
+    p_value = fixed_effects[,"Pr(>|t|)"],
+    Std_Beta = round(beta$Std_Coefficient, 3)
+  )
+  
+  model_summaries <- rbind(model_summaries, temp_df)
+}
+
+# Format results
+model_summaries <- model_summaries %>%
+  mutate(
+    p_value = format.pval(p_value, digits = 3),
+    Significant = ifelse(as.numeric(p_value) < 0.05, "*", "")
+  )
+
+# Display formatted table
+kable(model_summaries,
+      caption = "Summary of Gaussian Models with log()",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+# Plotting by continuous
+ggplot(AOI_student_data_pretest, 
+       aes(x = Pre_MP, 
+           y = Numerator_Denominator_Transitions_Pretest , 
+           color = MA_level)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95, alpha = 0.3) +
+  geom_jitter(alpha = 0.5) +
+  labs(x = "Pre_MP", 
+       y = "Numerator_Denominator_Transitions_Pretest",
+       color = "MA_level") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Plotting by continuous
+ggplot(AOI_student_data_pretest, 
+       aes(x = Pre_MP, 
+           y = New_Problem_AOIs_Pretest , 
+           color = MA_level)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95, alpha = 0.3) +
+  geom_jitter(alpha = 0.5) +
+  labs(x = "Pre_MP", 
+       y = "New_Problem_AOIs_Pretest",
+       color = "MA_level") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+#### Problem-level: gaze counts across correct reponses
+
+```{r RQ2_Correct_AOI_linear_problem_level_hlm, include = TRUE}
+
+pretest_problem_level_AOI_math_student_data <- problem_level_AOI_math_student_data %>% filter (grepl("^P", Image))
+pretest_problem_level_AOI_math_student_data_correct <- pretest_problem_level_AOI_math_student_data %>% filter (Correct == "TRUE")
+
+# Modeling with HLM
+model <- lmer(log(New_Problem_AOIs + 0.0000000000001) ~ scale(MA) * scale(Pre_MP) + (1|Image) + (1|problem_Order) + (1|pid), data = pretest_problem_level_AOI_math_student_data_correct)
+summary(model)
+shapiro.test(resid(model))
+
+# Plotting by continuous
+ggplot(pretest_problem_level_AOI_math_student_data_correct, 
+       aes(x = Pre_MP, 
+           y = New_Problem_AOIs , 
+           color = MA_level)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "lm", level = 0.95, alpha = 0.3) +
+  geom_jitter() +
+  labs(x = "MP", 
+       y = "New_Problem_AOIs across correct",
+       color = "MA_level") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Modeling with HLM
+model <- lmer(log(New_Response_AOIs + 0.0000000000001) ~ scale(MA) * scale(Pre_MP) + (1|Image) + (1|problem_Order) + (1|pid), data = pretest_problem_level_AOI_math_student_data_correct)
+summary(model)
+shapiro.test(resid(model))
+
+# Modeling with HLM
+model <- lmer(log(Numerator_Denominator_Transitions + 0.0000000000001) ~ scale(MA) * scale(Pre_MP) + (1|Image) + (1|problem_Order) + (1|pid), data = pretest_problem_level_AOI_math_student_data_correct)
+summary(model)
+shapiro.test(resid(model))
+
+# Modeling with HLM
+model <- lmer(log(Total_Problem_AOIs_prop + 0.0000000000001) ~ scale(MA) * scale(Pre_MP) + (1|Image) + (1|problem_Order) + (1|pid), data = pretest_problem_level_AOI_math_student_data_correct)
+summary(model)
+shapiro.test(resid(model))
+
+# Modeling with HLM
+model <- lmer(log(Total_Response_AOIs_prop + 0.0000000000001) ~ scale(MA) * scale(Pre_MP) + (1|Image) + (1|problem_Order) + (1|pid), data = pretest_problem_level_AOI_math_student_data_correct)
+summary(model)
+shapiro.test(resid(model))
+
+# Modeling with HLM
+model <- lmer(log(Total_Hits_Outside_of_Screen_prop + 0.0000000000001) ~ scale(MA) * scale(Pre_MP) + (1|Image) + (1|problem_Order) + (1|pid), data = pretest_problem_level_AOI_math_student_data_correct)
+summary(model)
+shapiro.test(resid(model))
+```
+
+#### Problem-level: gaze counts across all reponses
+
+```{r RQ2_All_AOI_linear_problem_level_hlm, include = TRUE}
+
+# Modeling with HLM
+model <- lmer(log(New_Problem_AOIs + 0.0000000000001) ~ scale(MA) * scale(Pre_MP) + (1|Image) + (1|problem_Order) + (1|pid), data = pretest_problem_level_AOI_math_student_data)
+summary(model)
+shapiro.test(resid(model))
+
+# Plotting by continuous
+ggplot(pretest_problem_level_AOI_math_student_data, 
+       aes(x = Pre_MP, 
+           y = New_Problem_AOIs , 
+           color = MA_level)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95, alpha = 0.3) +
+  geom_jitter(alpha = 0.3) +
+  labs(x = "MP", 
+       y = "New_Problem_AOIs across all",
+       color = "MA_level") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+
+# Modeling with HLM
+model <- lmer(log(New_Response_AOIs + 0.0000000000001) ~ scale(MA) * scale(Pre_MP) + (1|Image) + (1|problem_Order) + (1|pid), data = pretest_problem_level_AOI_math_student_data)
+summary(model)
+shapiro.test(resid(model))
+
+# Modeling with HLM
+model <- lmer(log(Numerator_Denominator_Transitions + 0.0000000000001) ~ scale(MA) * scale(Pre_MP) + (1|Image) + (1|problem_Order) + (1|pid), data = pretest_problem_level_AOI_math_student_data)
+summary(model)
+shapiro.test(resid(model))
+
+# Modeling with HLM
+model <- lmer(log(Total_Problem_AOIs_prop + 0.0000000000001) ~ scale(MA) * scale(Pre_MP) + (1|problem_Order) + (1|pid), data = pretest_problem_level_AOI_math_student_data)
+summary(model)
+shapiro.test(resid(model))
+
+# Modeling with HLM
+model <- lmer(log(Total_Response_AOIs_prop + 0.0000000000001) ~ scale(MA) * scale(Pre_MP) + (1|Image) + (1|problem_Order) + (1|pid), data = pretest_problem_level_AOI_math_student_data)
+summary(model)
+shapiro.test(resid(model))
+
+# Modeling with HLM
+model <- lmer(log(Total_Hits_Outside_of_Screen_prop + 0.0000000000001) ~ scale(MA) * scale(Pre_MP) + (1|Image) + (1|problem_Order) + (1|pid), data = pretest_problem_level_AOI_math_student_data)
+summary(model)
+shapiro.test(resid(model))
+
+```
+
+# RQ3: Executive functions
+Will two math anxious clusters differ between each other in executive functions?
+
+```{r RQ3_data, echo=FALSE}
+
+setwd("~/Documents/Data_Analysis/Eye_tracking_fractions/Code/Output_files")
+
+# Read the data with explicit column types
+EF_data <- read_csv("EF_data_combined.csv")
+
+setwd("~/Documents/Data_Analysis/Eye_tracking_fractions/Code/Analysis")
+
+student_data_EF <- unique(EF_data) %>% filter (grepl("session0$", bid)) %>%
+  inner_join(student_data,
+             by = "pid")
+
+names(student_data_EF)[names(student_data_EF) == 'STROOP.rcs.overall'] <- 'Inhibition'
+names(student_data_EF)[names(student_data_EF) == 'TASKSWITCH.rcs.overall'] <- 'Flexibility'
+names(student_data_EF)[names(student_data_EF) == 'BACKWARDSSPATIALSPAN.object_count_span.overall'] <- 'WM'
+
+# WM subgroups
+
+## Calculating WM-level subgroups
+student_data_EF <- student_data_EF %>% mutate (WM_level = ifelse (WM > (mean(WM, na.rm=T) + sd(WM, na.rm=T)), "High", 
+                                         ifelse (WM < (mean(WM, na.rm=T) - sd(WM, na.rm=T)), "Low", "Middle")),
+    WM_level = factor(WM_level, levels = c("Low", "Middle", "High")))
+
+## Calculating WM-level norm subgroups
+student_data_EF <- student_data_EF %>% mutate (WM_level_norm = ifelse (WM > (5.78 + 0.85), "High", 
+                                         ifelse (WM < (5.78 - 0.85), "Low", "Middle")),
+    WM_level_norm = factor(WM_level_norm, levels = c("Low", "Middle", "High")))
+
+# Inhibition
+
+## Calculating Inhibition-level subgroups
+student_data_EF <- student_data_EF %>% mutate (
+  Inhibition_level = ifelse (Inhibition > (mean(Inhibition, na.rm=T) + sd(Inhibition, na.rm=T)), "High",
+                             ifelse (Inhibition < (mean(Inhibition, na.rm=T) - sd(Inhibition, na.rm=T)), "Low", 
+                                     "Middle")),
+    Inhibition_level = factor(Inhibition_level, levels = c("Low", "Middle", "High")))
+
+## Calculating Inhibition-level norm subgroups
+student_data_EF <- student_data_EF %>% mutate (
+  Inhibition_level_norm = ifelse (Inhibition > (1.56 + 0.24), "High",
+                ifelse (Inhibition < (1.56 - 0.24), "Low", "Middle")),
+    Inhibition_level_norm = factor(Inhibition_level_norm, levels = c("Low", "Middle", "High")))
+
+# Flexibility
+
+## Calculating Flexibility-level subgroups
+student_data_EF <- student_data_EF %>% mutate (
+  Flexibility_level = ifelse (Flexibility > (mean(Flexibility, na.rm=T) + sd(Flexibility, na.rm=T)), "High",
+                             ifelse (Flexibility < (mean(Flexibility, na.rm=T) - sd(Flexibility, na.rm=T)), "Low", 
+                                     "Middle")),
+    Flexibility_level = factor(Flexibility_level, levels = c("Low", "Middle", "High")))
+
+## Calculating Flexibility-level norm subgroups
+student_data_EF <- student_data_EF %>% mutate (
+  Flexibility_level_norm = ifelse ( Flexibility > (1.32 + 0.35), "High", 
+                         ifelse ( Flexibility < (1.32 - 0.35), "Low", "Middle")),
+    Flexibility_level_norm = factor(Flexibility_level_norm, levels = c("Low", "Middle", "High")))
+
+```
+
+## EF distributions
+
+```{r RQ3_EF_distributions, echo=T}
+
+## NAs in EF data
+sum(is.na(student_data_EF$Inhibition))
+sum(is.na(student_data_EF$Flexibility))
+sum(is.na(student_data_EF$WM))
+
+# WM plot
+p1 <- ggplot(student_data_EF, aes(x = WM)) +
+  geom_histogram(fill = "#69b3a2", color = "white", bins = 20, alpha = 0.8) +
+  labs(title = "WM", x = "Working Memory (Corsi Block)", y = "Number of Students") +
+  coord_cartesian(xlim = c(0, 11)) +
+  geom_vline(xintercept = c(5, 9), linetype = "dotted") +
+  theme_minimal()
+
+# Inhibition plot
+p2 <- ggplot(student_data_EF, aes(x = Inhibition)) +
+  geom_histogram(fill = "#404080", color = "white", bins = 20, alpha = 0.8) +
+  labs(title = "Inhibition", x = "Inhibition (Stroop Task)", y = "Number of Students") +
+  coord_cartesian(xlim = c(0, 3)) +
+  geom_vline(xintercept = c(0.63, 2.28), linetype = "dotted") +
+  theme_minimal()
+
+# Flexibility plot
+p3 <- ggplot(student_data_EF, aes(x = Flexibility)) +
+  geom_histogram(fill = "#e07b91", color = "white", bins = 20, alpha = 0.8) +
+  labs(title = "Shifting", x = "Shifting (Task Switch)", y = "Number of Students") +
+  coord_cartesian(xlim = c(0, 3)) +
+  geom_vline(xintercept = c(0.60, 2.51), linetype = "dotted") +
+  theme_minimal()
+
+library(patchwork)  # for combining plots
+
+# Combine in one row
+p1 + p2 + p3 + plot_layout(nrow = 1)
+
+
+student_data_EF %>%
+  summarise(across(c(WM, Inhibition, Flexibility),
+                   list(mean = ~mean(.x, na.rm = TRUE),
+                        sd   = ~sd(.x, na.rm = TRUE),
+                        min  = ~min(.x, na.rm = TRUE),
+                        max  = ~max(.x, na.rm = TRUE)))) %>%
+  pivot_longer(cols = everything(),
+               names_to = c("Variable", "Stat"),
+               names_sep = "_") %>%
+  pivot_wider(names_from = Stat, values_from = value) %>%
+  mutate(
+    `Min` = sprintf("%.2f", min),
+    `Mean ± SD` = sprintf("%.2f ± %.2f", mean, sd),
+    `Max` = sprintf("%.2f", max)
+  ) %>%
+  select(Variable, Min, `Mean ± SD`,Max)
+
+```
+```{r RQ3_EF_cor_matrix, echo=T}
+
+## MA, MP and time
+data_quant <- 
+  student_data_EF [, (colnames(student_data_EF) %in% 
+             c('MA', 'Pre_MP', 'Pre_Time', 
+               'arousal_Pretest_mean', 'arousal_PrePre', 'valence_Pretest_mean', 'valence_PrePre', 
+               'WM', 'Inhibition', 'Flexibility'))]
+
+# Creating matrix
+apa.cor.table(
+  data = data_quant,
+  filename = "Descriptives.doc",
+  table.number = 1,
+  show.conf.interval = TRUE,
+  show.sig.stars = TRUE,
+  landscape = TRUE
+)
+```
+
+```{r RQ3_EF_distributions_combine_with_norms, echo=T}
+
+# Your sample stats
+sample_stats <- student_data_EF %>%
+  summarise(across(c(WM, Inhibition, Flexibility),
+                   list(mean = ~mean(.x, na.rm = TRUE),
+                        sd = ~sd(.x, na.rm = TRUE),
+                        min = ~min(.x, na.rm = TRUE),
+                        max = ~max(.x, na.rm = TRUE)))) %>%
+  pivot_longer(everything(), names_to = c("Variable", "Stat"), names_sep = "_") %>%
+  pivot_wider(names_from = Stat, values_from = value) %>%
+  mutate(Source = "Our sample")
+
+# Normative values (manually entered)
+norms <- tibble(
+  Variable = c("WM", "Inhibition", "Flexibility"),
+  mean = c(5.78, 1.56, 1.32),
+  sd = c(0.85, 0.24, 0.35),
+  min = c(5.00, 0.83, 0.70),
+  max = c(9.00, 2.28, 2.51),
+  Source = "Norm"
+)
+
+# Combine
+combined_stats <- bind_rows(sample_stats, norms)
+
+# Option 1 plot
+ggplot(combined_stats, aes(x = Variable, y = mean, color = Source, group = Source)) +
+  geom_point(position = position_dodge(width = 0.5), size = 3) +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd), 
+                width = 0.15, position = position_dodge(width = 0.5)) +
+  geom_linerange(aes(ymin = min, ymax = max), 
+                 position = position_dodge(width = 0.5), 
+                 linetype = "dotted", size = 0.8) +
+  labs(title = "Comparison of Sample and Norm Values for EF Measures",
+       y = "Score",
+       x = "Variable",
+       color = "Source") +
+  theme_minimal()
+
+# Option 2 plot
+ggplot(combined_stats, aes(y = Variable, x = mean, fill = Source)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+  geom_errorbar(aes(xmin = mean - sd, xmax = mean + sd),
+                position = position_dodge(width = 0.7), width = 0.2) +
+  geom_point(aes(x = min), shape = 4, size = 2, position = position_dodge(width = 0.7)) +
+  geom_point(aes(x = max), shape = 4, size = 2, position = position_dodge(width = 0.7)) +
+  labs(title = "EF Measures: Sample vs. Norm (Mean ± SD with Min/Max)",
+       x = "Score", y = "Variable", fill = "Sample type") +
+  theme_minimal()
+
+```
+
+
+## Proposed analysis - ANOVA
+
+```{r RQ3_proposed_analyzing_ANOVA, include=TRUE}
+
+print ("Participants with Inhibition and Flexibility data")
+student_data_EF %>%
+  group_by (pre_cluster_groups) %>%
+  summarise(n = n())
+
+print ("Participants with WM data")
+student_data_EF %>%
+  group_by (pre_cluster_groups) %>%
+  summarise(n = n())
+
+EF_cols <- c("WM", "Inhibition", "Flexibility")
+
+## -- Analysis
+
+# Function to run ANOVA and Tukey HSD, returning tidy results
+run_tukey <- function(outcome_var, data, group_var) {
+  # ANOVA
+  formula <- as.formula(paste(outcome_var, "~", group_var))
+  aov_result <- aov(formula, data = data)
+  
+  # Extract ANOVA results
+  anova_summary <- summary(aov_result)[[1]]
+  anova_df <- data.frame(
+    outcome = outcome_var,
+    df = anova_summary$Df[1],
+    sum_sq = anova_summary$`Sum Sq`[1],
+    mean_sq = anova_summary$`Mean Sq`[1],
+    F_value = anova_summary$`F value`[1],
+    p_value = anova_summary$`Pr(>F)`[1]
+  )
+
+  # Tukey's HSD
+  tukey_result <- TukeyHSD(aov_result)
+  tukey_df <- as.data.frame(tukey_result[[group_var]])
+  tukey_df$comparison <- rownames(tukey_df)
+
+  # Return tidy Tukey results
+  tukey_df %>%
+    transmute(
+      outcome = outcome_var,
+      comparison,
+      diff,
+      lwr,
+      upr,
+      p_adj = `p adj`
+    ) %>%
+    mutate(anova_p_value = anova_df$p_value)
+}
+
+# Run all tests and combine results
+all_tukey_tests <- map_df(EF_cols, 
+                          ~run_tukey(.x, data = student_data_EF, group_var = "pre_cluster_groups"))
+
+# View results in nice format
+all_tukey_tests %>%
+  arrange(outcome, p_adj) %>%
+  mutate(across(c(diff, lwr, upr, p_adj, anova_p_value), ~round(., 4))) %>%
+  knitr::kable()
+
+
+## -- Boxplots
+
+# Create boxplot for WM
+ggplot(student_data_EF, 
+       aes(x = pre_cluster_groups, y = WM, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7, na.rm = TRUE) +
+  geom_jitter(width = 0.2, alpha = 0.4, na.rm = TRUE) +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "WM",
+       title = "WM Comparison") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+# Violin
+ggplot(student_data_EF, 
+       aes(x = pre_cluster_groups, y = WM, fill = pre_cluster_groups)) +
+  geom_violin(trim = FALSE, alpha = 0.6) +
+  geom_boxplot(width = 0.1, outlier.shape = NA, color = "black") +
+  geom_jitter(width = 0.2, alpha = 0.3, color = "black") +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "Working Memory (WM)",
+       title = "Distribution of WM by Cluster Group") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+# Create boxplot for Inhibition 
+ggplot(student_data_EF, 
+       aes(x = pre_cluster_groups, y = Inhibition, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "Inhibition",
+       title = "Inhibition Comparison") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+# Create boxplot for Flexibility 
+ggplot(student_data_EF, 
+       aes(x = pre_cluster_groups, y = Flexibility, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "Flexibility",
+       title = "Flexibility Comparison") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+# Violin
+ggplot(student_data_EF, 
+       aes(x = pre_cluster_groups, y = Flexibility, fill = pre_cluster_groups)) +
+  geom_violin(trim = FALSE, alpha = 0.6) +
+  geom_boxplot(width = 0.1, outlier.shape = NA, color = "black") +
+  geom_jitter(width = 0.2, alpha = 0.3, color = "black") +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "Working Memory (Flexibility)",
+       title = "Distribution of Flexibility by Cluster Group") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+# Plots with mean and CI
+summary_data <- student_data_EF %>%
+  group_by(pre_cluster_groups) %>%
+  summarise(mean_Flexibility = mean(Flexibility, na.rm=TRUE),
+            se = sd(Flexibility, na.rm=TRUE) / sqrt(n()),
+            ci_lower = mean_Flexibility - qt(0.975, df = n() - 1) * se,
+            ci_upper = mean_Flexibility + qt(0.975, df = n() - 1) * se)
+
+ggplot(summary_data, aes(x = pre_cluster_groups, y = mean_Flexibility, fill = pre_cluster_groups)) +
+  geom_col(alpha = 0.7, width = 0.5) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.2) +
+  theme_minimal() +
+  labs(x = "Group",
+       y = "Mean Inhibition",
+       title = "Mean Inhibition with 95% CI (All Responses)") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+
+```
+
+```{r RQ3_proposed_tukey, include = TRUE}
+
+# Function to check ANOVA assumptions
+check_anova_assumptions <- function(outcome_var, data, group_var) {
+  formula <- as.formula(paste(outcome_var, "~", group_var))
+  aov_result <- aov(formula, data = data)
+  residuals <- residuals(aov_result)
+
+  # Normality test (Shapiro-Wilk)
+  normality_test <- shapiro.test(residuals)
+
+  # Homogeneity of variance (Levene's test)
+  levene_test <- leveneTest(formula, data = data)
+
+  list(
+    normality_p = normality_test$p.value,
+    levene_p = levene_test$`Pr(>F)`[1]
+  )
+}
+
+# Function to run ANOVA and Tukey HSD, returning tidy results
+run_tukey <- function(outcome_var, data, group_var) {
+  # Check assumptions first
+  assumptions <- check_anova_assumptions(outcome_var, data, group_var)
+
+  if (assumptions$normality_p < 0.05 | assumptions$levene_p < 0.05) {
+    warning(paste("Assumptions violated for", outcome_var, "- interpret results with caution."))
+  }
+
+  # ANOVA
+  formula <- as.formula(paste(outcome_var, "~", group_var))
+  aov_result <- aov(formula, data = data)
+  
+  # Extract ANOVA results
+  anova_summary <- summary(aov_result)[[1]]
+  anova_df <- data.frame(
+    outcome = outcome_var,
+    df = anova_summary$Df[1],
+    sum_sq = anova_summary$`Sum Sq`[1],
+    mean_sq = anova_summary$`Mean Sq`[1],
+    F_value = anova_summary$`F value`[1],
+    p_value = anova_summary$`Pr(>F)`[1]
+  )
+
+  # Tukey's HSD
+  tukey_result <- TukeyHSD(aov_result)
+  tukey_df <- as.data.frame(tukey_result[[group_var]])
+  tukey_df$comparison <- rownames(tukey_df)
+
+  # Return tidy Tukey results with assumption checks
+  tukey_df %>%
+    transmute(
+      outcome = outcome_var,
+      comparison,
+      diff,
+      lwr,
+      upr,
+      p_adj = `p adj`
+    ) %>%
+    mutate(anova_p_value = anova_df$p_value,
+           normality_p_value = assumptions$normality_p,
+           levene_p_value = assumptions$levene_p)
+}
+
+# Run all tests and combine results
+all_tukey_tests <- map_df(EF_cols, 
+                          ~run_tukey(.x, data = student_data_EF, group_var = "pre_cluster_groups"))
+
+# View results in nice format
+all_tukey_tests %>%
+  arrange(outcome, p_adj) %>%
+  mutate(across(c(diff, lwr, upr, p_adj, anova_p_value, normality_p_value, levene_p_value), ~round(., 4))) %>%
+  knitr::kable()
+
+```
+```{r RQ3_dunn, include = TRUE}
+
+dunn.test(student_data_EF$WM, g=student_data$pre_cluster_groups, method='bonferroni')
+
+dunn.test(student_data_EF$Inhibition, g=student_data$pre_cluster_groups, method='bonferroni')
+
+```
+
+## Updated analysis -- linear analysis, predicting
+
+#### in working memory
+
+```{r RQ3_updated_performance_WM, include = TRUE}
+
+# Modeling with lm()
+model <- lm(WM ~ scale(MA) * scale(Pre_MP), data = student_data_EF)
+summary(model)
+shapiro.test(resid(model))
+bptest(model) # if p > 0.05 -- no strong evidence of heteroscedasticity (OLS is okay)
+
+# Modeling with lm_robust()
+model_robust <- lm_robust(WM ~ scale(MA) * scale(Pre_MP), data = student_data_EF)
+summary(model_robust)
+
+# Plotting by continuous
+ggplot(student_data_EF, aes(x = WM, y = WM , color = MA_level, alpha = 0.7)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95) +
+  geom_jitter() +
+  #facet_wrap(~MA_level) +
+  labs(x = "Pre_MP", 
+       y = "WM",
+       color = "MA_level") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+
+
+#### in inhibition
+
+```{r RQ3_updated_performance_Inhibiiton, include = TRUE}
+
+# Modeling with lm()
+model <- lm(Inhibition ~ scale(MA) * scale(Pre_MP), data = student_data_EF)
+summary(model)
+shapiro.test(resid(model))
+bptest(model) # if p > 0.05 -- no strong evidence of heteroscedasticity (OLS is okay)
+
+# Modeling with lm_robust()
+model_robust <- lm_robust(Inhibition ~ scale(MA) * scale(Pre_MP), data = student_data_EF)
+summary(model_robust)
+
+# Plotting by continuous
+ggplot(student_data_EF, aes(x = Inhibition, y = WM , color = MA_level, alpha = 0.7)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95) +
+  geom_jitter() +
+  #facet_wrap(~MA_level) +
+  labs(x = "Pre_MP", 
+       y = "Inhibition",
+       color = "MA_level") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+
+```
+
+#### in flexibility
+
+```{r RQ3_updated_performance_Flexibility, include = TRUE}
+
+# Modeling with lm()
+model <- lm(Flexibility ~ scale(MA) * scale(Pre_MP), data = student_data_EF)
+summary(model)
+shapiro.test(resid(model))
+bptest(model) # if p > 0.05 -- no strong evidence of heteroscedasticity (OLS is okay)
+
+# Plotting by continuous
+ggplot(student_data_EF, aes(x = Flexibility, y = WM , color = MA_level, alpha = 0.7)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95) +
+  geom_jitter() +
+  #facet_wrap(~MA_level) +
+  labs(x = "Pre_MP", 
+       y = "Flexibility",
+       color = "MA_level") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+### Additional: EF and response time
+
+```{r RQ3_EF_and_time_dist, include=TRUE}
+student_data_EF_without_h_l <- student_data_EF %>% 
+  filter (pre_cluster_groups %in% c("hMP_mMA", "lMP_mMA"))
+
+# WM
+
+## Plot time distribution by cluster
+ggplot(student_data_EF_without_h_l, aes(x = Pre_Time, fill = WM_level)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~pre_cluster_groups) +
+  labs(title = "Distribution of Pretest Time by cluster",
+       x = "Mean Time",
+       y = "Density")
+
+## Plot time distribution by cluster
+ggplot(student_data_EF_without_h_l, aes(x = Pre_Time_Correct, fill = WM_level)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~pre_cluster_groups) +
+  labs(title = "Distribution of Pretest Time by cluster",
+       x = "Mean Time",
+       y = "Density")  
+
+# Inhibition
+
+## Plot time distribution by cluster
+ggplot(student_data_EF_without_h_l, aes(x = Pre_Time, fill = Inhibition_level)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~pre_cluster_groups) +
+  labs(title = "Distribution of Pretest Time by cluster",
+       x = "Mean Time",
+       y = "Density")
+
+## Plot time distribution by cluster
+ggplot(student_data_EF_without_h_l, aes(x = Pre_Time_Correct, fill = Inhibition_level)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~pre_cluster_groups) +
+  labs(title = "Distribution of Pretest Time by cluster",
+       x = "Mean Time",
+       y = "Density")
+
+# Flexibility
+
+## Plot time distribution by cluster
+ggplot(student_data_EF_without_h_l, aes(x = Pre_Time, fill = Flexibility_level)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~pre_cluster_groups) +
+  labs(title = "Distribution of Pretest Time by cluster",
+       x = "Mean Time",
+       y = "Density")
+
+## Plot time distribution by cluster
+ggplot(student_data_EF_without_h_l, aes(x = Pre_Time_Correct, fill = Flexibility_level)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~pre_cluster_groups) +
+  labs(title = "Distribution of Pretest Time by cluster",
+       x = "Mean Time",
+       y = "Density")
+
+```
+
+# RQ4: Different cues
+
+Will congruent and incongruent cues differently impact the processing efficiency of students from different anxious clusters?
+
+## Time and perf
+
+### Problem-level 
+
+#### Time distribution
+
+```{r RQ4_time_dist, include=TRUE}
+
+experiment_data %>%
+  summarise(
+    Minimum = min(trialElapsedTime, na.rm = TRUE),
+    Mean = mean(trialElapsedTime, na.rm = TRUE),
+    Median = median(trialElapsedTime, na.rm = TRUE),
+    Maximum = max(trialElapsedTime, na.rm = TRUE),
+    `Standard Deviation` = sd(trialElapsedTime, na.rm = TRUE),
+    `Count > 3*SD` = sum(trialElapsedTime > 3 * sd(trialElapsedTime), na.rm = TRUE)
+  )
+
+## Time distribution
+ggplot(math_data, aes(x = log(trialElapsedTime), fill = Test)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of logged response time",
+       x = "Response time",
+       y = "Density")
+```
+
+#### Time and perf distributions
+
+```{r exp_math_data_compare, include=TRUE}
+
+exp_mean_data_if_simp <- experiment_data %>% 
+  group_by (pid, Simplification) %>%
+  summarise(Exp_MP = mean(Correct),
+            Exp_Time = mean(trialElapsedTime))
+
+# Plot correctness distribution by Simplification
+ggplot(exp_mean_data_if_simp, aes(x = Exp_MP, fill = Simplification)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Experiment Correctness by Simplification",
+       x = "Mean Correctness",
+       y = "Density")
+
+# Plot time distribution by Simplification
+ggplot(exp_mean_data_if_simp, aes(x = Exp_Time, fill = Simplification)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Experiment Time by Simplification",
+       x = "Mean Time",
+       y = "Density")
+
+exp_mean_data_if_HOO <- experiment_data %>% 
+  group_by (pid, HOO_Position) %>%
+  summarise(Exp_MP = mean(Correct),
+            Exp_Time = mean(trialElapsedTime))
+
+# Plot correctness distribution by HOO_Position
+ggplot(exp_mean_data_if_HOO, aes(x = Exp_MP, fill = HOO_Position)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Experiment Correctness by HOO_Position",
+       x = "Mean Correctness",
+       y = "Density")
+
+# Plot time distribution by HOO_Position
+ggplot(exp_mean_data_if_HOO, aes(x = Exp_Time, fill = HOO_Position)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Experiment Time by HOO_Position",
+       x = "Mean Time",
+       y = "Density")
+
+```
+## Student-level data
+
+```{r RQ4_student_data_preparation, include=FALSE}
+
+# ------------------------------------------ #
+# ---- Student-level data preparation ------ #
+# ------------------------------------------ #
+
+## Arousal and valence data preparation
+
+### Calculate mean arousal: during experiment
+student_data <- student_data %>% mutate (arousal_Exp_mean = (arousal_Exp_2 + arousal_Exp_12)/2)
+
+### Calculate dif in arousal
+student_data <- student_data %>% mutate (arousal_Exp_dif = arousal_Exp_mean - arousal_Pretest_mean)
+
+### Calculate mean valence during experiment
+student_data <- student_data %>% mutate (valence_Exp_mean = (valence_Exp_2 + valence_Exp_12)/2)
+
+### Calculate dif in valence
+student_data <- student_data %>% mutate (valence_Exp_dif = valence_Exp_mean - valence_Pretest_mean)
+
+## Mean time and performane data preparation
+
+### Experiment datasets 
+exp_mean_data <- experiment_data %>% 
+  group_by (pid) %>%
+  summarise(Exp_MP = mean(Correct),
+            Exp_Time = mean(trialElapsedTime))
+
+exp_mean_data_simp <- experiment_data %>% 
+  filter (Simplification == "Yes") %>%
+  group_by (pid) %>%
+  summarise(Exp_MP_Simp = mean(Correct),
+            Exp_Time_Simp = mean(trialElapsedTime))
+
+exp_mean_data_no_simp <- experiment_data %>% 
+  filter (Simplification == "No") %>%
+  group_by (pid) %>%
+  summarise(Exp_MP_NoSimp = mean(Correct),
+            Exp_Time_NoSimp = mean(trialElapsedTime))
+
+exp_mean_data_HOO_left <- experiment_data %>% 
+  filter (HOO_Position == "Left") %>%
+  group_by (pid) %>%
+  summarise(Exp_MP_Left = mean(Correct),
+            Exp_Time_Left = mean(trialElapsedTime))
+
+exp_mean_data_HOO_right <- experiment_data %>% 
+  filter (HOO_Position == "Right") %>%
+  group_by (pid) %>%
+  summarise(Exp_MP_Right = mean(Correct),
+            Exp_Time_Right = mean(trialElapsedTime))
+
+exp_mean_time_correct <- experiment_data %>% 
+  filter (Correct == "TRUE") %>%
+  group_by (pid) %>%
+  summarise(Exp_Time_Correct = mean(trialElapsedTime))
+
+exp_mean_time_incorrect <- experiment_data %>% 
+  filter (Correct == "FALSE") %>%
+  group_by (pid) %>%
+  summarise(Exp_Time_Incorrect = mean(trialElapsedTime))
+
+### Merging experiment math means
+exp_math_mean_data <- exp_mean_data %>%
+  merge(exp_mean_data_simp, by = "pid") %>%
+  merge(exp_mean_data_no_simp, by = "pid") %>%
+  merge(exp_mean_data_HOO_left, by = "pid") %>%
+  merge(exp_mean_data_HOO_right, by = "pid") %>%
+  merge(exp_mean_time_correct, by = "pid", all.x = TRUE) %>%
+  merge(exp_mean_time_incorrect, by = "pid", all.x = TRUE)
+
+### Merging pretest and condition mean math datasets
+exp_math_mean_data <- merge(pretest_math_mean_data, exp_math_mean_data, by = "pid", suffixes = c("", "_drop"))
+exp_math_mean_data <- exp_math_mean_data[, !grepl("_drop$", names(exp_math_mean_data))]
+
+## Calculating difference data (exp - pre)
+
+### Math performance
+exp_math_mean_data <- exp_math_mean_data %>% 
+  mutate(MP_dif = Exp_MP - Pre_MP,
+         MP_dif_Right = Exp_MP_Right - Pre_MP_Right,
+         MP_dif_Left = Exp_MP_Left - Pre_MP_Left,
+         MP_dif_Simp = Exp_MP_Simp - Pre_MP_Simp,
+         MP_dif_NoSimp = Exp_MP_NoSimp - Pre_MP_NoSimp)
+
+### Response time
+exp_math_mean_data <- exp_math_mean_data %>% 
+  mutate(Time_dif = Exp_Time - Pre_Time,
+         Time_dif_Correct = Exp_Time_Correct - Pre_Time_Correct,
+         Time_dif_Incorrect = Exp_Time_Incorrect - Pre_Time_Incorrect,
+         Time_dif_Right = Exp_Time_Right - Pre_Time_Right,
+         Time_dif_Left = Exp_Time_Left - Pre_Time_Left,
+         Time_dif_Simp = Exp_Time_Simp - Pre_Time_Simp,
+         Time_dif_NoSimp = Exp_Time_NoSimp - Pre_Time_NoSimp
+         )
+
+student_data_exp <- merge(student_data, exp_math_mean_data, by = "pid", suffixes = c("", "_drop"))
+student_data_exp <- student_data_exp[, !grepl("_drop$", names(student_data_exp))]
+
+```
+
+### Student-level correlation matrix
+
+```{r cor_matrix_exp, include=FALSE}
+
+## MA, MP and time
+data_quant <- 
+  student_data_exp [, (colnames(student_data_exp) %in% 
+             c('MA',
+    'Pre_MP', 'Pre_MP_Simp', 'Pre_MP_NoSimp', 
+    'Cond_MP', 'Cond_MP_simp', 'Cond_MP_no_simp', 
+    'Pre_Time', 'Pre_Time_simp', 'Pre_Time_no_simp', 
+    'Cond_Time', 'Cond_Time_simp', 'Cond_Time_no_simp'))]
+
+# Creating matrix
+apa.cor.table(
+  data = data_quant,
+  filename = "Descriptives.doc",
+  table.number = 1,
+  show.conf.interval = TRUE,
+  show.sig.stars = TRUE,
+  landscape = TRUE
+)
+
+## MA, valence and arousal
+data_quant_all <- 
+  student_data_exp [, (colnames(student_data_exp) %in% 
+             c('MA', 
+    'Pre_MP', 'Exp_MP', 
+    'Pre_Time', 'Exp_Time', 
+    'arousal_Pretest_mean', 'arousal_Exp_mean',
+    'valence_Pretest_mean', 'valence_Exp_mean'))]
+
+# Creating matrix
+apa.cor.table(
+  data = data_quant_all,
+  filename = "Descriptives_all.doc",
+  table.number = 1,
+  show.conf.interval = TRUE,
+  show.sig.stars = TRUE,
+  landscape = TRUE
+)
+
+```
+
+### Student-level time
+
+#### Experiment response time data stats
+
+```{r RQ4_Exp_Time_stats, include = TRUE}
+
+student_data_exp %>%
+  summarise(
+    min = min(Exp_Time, na.rm = TRUE),
+    mean = mean(Exp_Time, na.rm = TRUE),
+    sd = sd(Exp_Time, na.rm = TRUE),
+    median = median(Exp_Time, na.rm = TRUE),
+    max = max(Exp_Time, na.rm = TRUE),
+    zeros = sum(Exp_Time == 0, na.rm = TRUE) / n()
+  ) %>%
+  pivot_longer(everything(),
+               names_to = "Stat",
+               values_to = "Value")
+
+```
+
+#### Experiment response time distribution
+
+```{r RQ2_Exp_Time_data_distribution, include = TRUE}
+
+# Plot time distribution
+ggplot(student_data_exp, aes(x = Exp_Time)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Experiment Time",
+       x = "Mean Time",
+       y = "Density")
+
+# Plot time distribution by Simplification
+
+## Reshape data to long format
+student_data_long <- student_data_exp %>%
+  pivot_longer(cols = c(Exp_Time_Correct, Exp_Time_Incorrect),
+               names_to = "Category",
+               values_to = "Time")
+
+## Create density plot
+ggplot(student_data_long, aes(x = Time, fill = Category)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Experiment Times",
+       x = "Time",
+       y = "Density") +
+  scale_fill_manual(values = c("Exp_Time_Correct" = "green",
+                               "Exp_Time_Incorrect" = "red"),
+                    labels = c("Correct Responses",
+                               "Incorrect Responses")) +
+  theme_minimal()
+
+
+# Plot time distribution by Simplification
+ggplot(exp_mean_data_if_simp, aes(x = Exp_Time, fill = Simplification)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Experiment Time by Simplification",
+       x = "Mean Time",
+       y = "Density")
+
+# Plot time distribution by HOO_Position
+ggplot(exp_mean_data_if_HOO, aes(x = Exp_Time, fill = HOO_Position)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Experiment Time by HOO_Position",
+       x = "Mean Time",
+       y = "Density")
+
+# Plot time distribution by cluster
+ggplot(student_data_exp, aes(x = Exp_Time, fill = pre_cluster_groups)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Experiment Time by cluster",
+       x = "Mean Time",
+       y = "Density")
+
+hist(student_data_exp$Exp_Time)
+hist(log(student_data_exp$Exp_Time))
+
+qqnorm(student_data_exp$Exp_Time)
+
+student_data_exp %>%
+  summarise(
+    Minimum = min(Exp_Time, na.rm = TRUE),
+    Median = median(Exp_Time, na.rm = TRUE),
+    Mean = mean(Exp_Time, na.rm = TRUE),
+    `Standard Deviation` = sd(Exp_Time, na.rm = TRUE),
+    `Count > 3*SD` = sum(Exp_Time > 3 * sd(Exp_Time), na.rm = TRUE)
+  )
+
+
+```
+
+#### Correct experiment response time data stats
+
+```{r RQ4_Cor_Exp_Time_stats_dif, include = TRUE}
+
+student_data_exp %>%
+  summarise(
+    min = min(Exp_Time_Correct, na.rm = TRUE),
+    mean = mean(Exp_Time_Correct, na.rm = TRUE),
+    sd = sd(Exp_Time_Correct, na.rm = TRUE),
+    median = median(Exp_Time_Correct, na.rm = TRUE),
+    max = max(Exp_Time_Correct, na.rm = TRUE),
+    zeros = sum(Exp_Time_Correct == 0, na.rm = TRUE) / n()
+  ) %>%
+  pivot_longer(everything(),
+               names_to = "Stat",
+               values_to = "Value")
+
+```
+
+#### Correct experiment response time distribution
+
+```{r RQ2_Cor_Exp_Time_data_distribution, include = TRUE}
+
+hist(student_data_exp$Exp_Time_Correct, breaks = 60)
+hist(log(student_data_exp$Exp_Time_Correct), breaks = 60)
+shapiro.test(log(student_data_exp$Exp_Time_Correct))
+
+# Plot time distribution by cluster
+ggplot(student_data_exp, aes(x = Exp_Time_Correct, fill = pre_cluster_groups)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Experiment Time in Correct Problems by cluster",
+       x = "Mean Time",
+       y = "Density")
+
+# Plot time distribution by cluster by condition
+ggplot(student_data_exp, aes(x = Exp_Time_Correct, fill = pre_cluster_groups)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~Condition) +
+  labs(title = "Distribution of Experiment Time in Correct Problems by cluster",
+       x = "Mean Time",
+       y = "Density")
+
+student_data_exp %>%
+  summarise(
+    Minimum = min(Exp_Time_Correct, na.rm = TRUE),
+    Median = median(Exp_Time_Correct, na.rm = TRUE),
+    Mean = mean(Exp_Time_Correct, na.rm = TRUE),
+    `Standard Deviation` = sd(Exp_Time_Correct, na.rm = TRUE),
+    `Count > 3*SD` = sum(Exp_Time_Correct > 3 * sd(Exp_Time_Correct), na.rm = TRUE)
+  )
+
+```
+
+#### Correct difference response time data stats
+
+```{r RQ4_Cor_Dif_Time_stats_dif, include = TRUE}
+
+student_data_exp %>%
+  summarise(
+    min = min(Time_dif_Correct, na.rm = TRUE),
+    mean = mean(Time_dif_Correct, na.rm = TRUE),
+    sd = sd(Time_dif_Correct, na.rm = TRUE),
+    median = median(Time_dif_Correct, na.rm = TRUE),
+    max = max(Time_dif_Correct, na.rm = TRUE),
+    zeros = sum(Time_dif_Correct == 0, na.rm = TRUE) / n()
+  ) %>%
+  pivot_longer(everything(),
+               names_to = "Stat",
+               values_to = "Value")
+
+```
+
+#### Correct difference response time distribution
+
+```{r RQ2_Cor_Dif_Time_data_distribution, include = TRUE}
+
+# Plot time distribution
+ggplot(student_data_exp, aes(x = MP_dif)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Difference in Time in Correct Problems",
+       x = "MP_dif",
+       y = "Density")
+
+hist(student_data_exp$Time_dif_Correct, breaks = 30)
+shapiro.test(student_data_exp$Time_dif_Correct)
+hist(log(student_data_exp$Time_dif_Correct), breaks = 30)
+shapiro.test(log(student_data_exp$Time_dif_Correct))
+
+# Plot time distribution by cluster
+ggplot(student_data_exp, aes(x = Time_dif_Correct, fill = pre_cluster_groups)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Difference in Time in Correct Problems by cluster",
+       x = "Mean Time",
+       y = "Density")
+
+# Plot time distribution by cluster by condition
+ggplot(student_data_exp, aes(x = Time_dif_Correct, fill = pre_cluster_groups)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~Condition) +
+  labs(title = "Distribution of Experiment Time in Correct Problems by cluster",
+       x = "Mean Time",
+       y = "Density")
+
+student_data_exp %>%
+  summarise(
+    Minimum = min(Time_dif_Correct, na.rm = TRUE),
+    Median = median(Time_dif_Correct, na.rm = TRUE),
+    Mean = mean(Time_dif_Correct, na.rm = TRUE),
+    `Standard Deviation` = sd(Time_dif_Correct, na.rm = TRUE),
+    `Count > 3*SD` = sum(Time_dif_Correct > 3 * sd(Time_dif_Correct), na.rm = TRUE)
+  )
+
+```
+
+## Time and perf: analysis
+
+### How many students in each condition in each cluster
+
+```{r exp_math_data_cluster_condition, include=TRUE}
+
+table(student_data_exp$pre_cluster_groups, student_data_exp$Condition)
+
+student_data_exp %>% 
+  group_by(pre_cluster_groups, Condition) %>%
+  summarise(n = n())
+
+student_data_exp %>% 
+  filter (Exp_MP > 0 & Pre_MP > 0) %>% 
+  group_by(pre_cluster_groups, Condition) %>%
+  summarise(n = n())
+
+
+```
+
+### Proposed analysis: all to all
+
+```{r RQ4_Time_proposed_clusters_prepare_data, include = TRUE}
+
+student_data_exp$Composite_score_exp <- student_data_exp$Exp_MP / student_data_exp$Exp_Time
+student_data_exp$Composite_score_dif <- student_data_exp$Composite_score_exp - student_data_exp$Composite_score_pre
+
+# Create a combined group-condition factor
+student_data_exp$group_condition <- interaction(student_data_exp$pre_cluster_groups, student_data_exp$Condition)
+
+print ("with at least one correct response in pretest and experiment")
+student_data_exp %>% filter (Exp_MP > 0 & Pre_MP > 0) %>% 
+                        group_by (pre_cluster_groups, Condition) %>%
+                        summarise(n = n())
+
+```
+
+
+
+#### Performance 
+
+```{r RQ4_Time_proposed_clusters_analyzing_data_MP, include = TRUE}
+
+# Dunn Test
+ dunn_results <- dunn.test(student_data_exp$MP_dif, student_data_exp$group_condition, method = "bonferroni")
+
+# Tidy results
+dunn_df <- data.frame(
+  comparison = dunn_results$comparisons,
+  Z = round(dunn_results$Z, 4),
+  p_adjusted = round(dunn_results$P.adjusted, 4)
+) %>% arrange(p_adjusted)
+
+knitr::kable(dunn_df)
+
+student_data_exp$Condition <- factor(student_data_exp$Condition, levels = c("Congruent", "Incongruent"))
+
+# Visualization with boxplots
+ggplot(student_data_exp, aes(x = group_condition, y = MP_dif, fill = Condition)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(title = "Comparison by performance change", x = "Group-Condition", y = "Math performence change") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+
+```
+
+```{r RQ4_Time_proposed_clusters_analyzing_data_MP_pretest_vs_exp, include = TRUE}
+
+# Visualization of pretest MP with boxplots
+ggplot(student_data, aes(x = pre_cluster_groups, y = Pre_MP)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(title = "Comparison by performance in pretest", x = "Group-Condition", y = "Math performence in pretest") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+
+# Visualization of experiment MP with boxplots
+ggplot(student_data_exp, aes(x = group_condition, y = Exp_MP, fill = Condition)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(title = "Comparison by performance in experiment", x = "Group-Condition", y = "Math performence in experiment") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+
+```
+
+#### Time across correct responses
+
+```{r RQ4_Correct_time_proposed, include = TRUE}
+
+# Deleting lMP_mMA, as it has only 2 participants
+student_data_exp_without_LP_MA_incong <- student_data_exp %>% 
+  filter (! (pre_cluster_groups == "lMP_mMA" & Condition == "Incongruent") )
+
+# Dunn Test
+ dunn_results <- dunn.test(student_data_exp_without_LP_MA_incong$Time_dif_Correct, 
+                           student_data_exp_without_LP_MA_incong$group_condition, method = "bonferroni")
+
+# Tidy results
+dunn_df <- data.frame(
+  comparison = dunn_results$comparisons,
+  Z = round(dunn_results$Z, 4),
+  p_adjusted = round(dunn_results$P.adjusted, 4)
+) %>% arrange(p_adjusted)
+
+knitr::kable(dunn_df)
+
+# Visualization with boxplots
+ggplot(student_data_exp_without_LP_MA_incong, aes(x = group_condition, y = Time_dif_Correct, fill = Condition)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(title = "Comparison by correct time difference", x = "Group-Condition", y = "Time_dif_Correct") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+
+```
+
+#### Time across all responses
+
+```{r RQ4_All_time_proposed, include = TRUE}
+
+# Dunn Test
+ dunn_results <- dunn.test(student_data_exp$Time_dif, student_data_exp$group_condition, method = "bonferroni")
+
+# Tidy results
+dunn_df <- data.frame(
+  comparison = dunn_results$comparisons,
+  Z = round(dunn_results$Z, 4),
+  p_adjusted = round(dunn_results$P.adjusted, 4)
+) %>% arrange(p_adjusted)
+
+knitr::kable(dunn_df)
+
+# Visualization with boxplots
+ggplot(student_data_exp, aes(x = group_condition, y = Time_dif, fill = Condition)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(title = "Comparison by all time difference", x = "Group-Condition", y = "Time_dif") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+```
+
+#### Arousal
+
+```{r RQ4_arousal_proposed, include = TRUE}
+
+# Dunn Test
+dunn_results <- dunn.test(student_data_exp$arousal_Exp_dif, student_data_exp$group_condition, method = "bonferroni")
+
+# Tidy results
+dunn_df <- data.frame(
+  comparison = dunn_results$comparisons,
+  Z = round(dunn_results$Z, 4),
+  p_adjusted = round(dunn_results$P.adjusted, 4)
+) %>% arrange(p_adjusted)
+
+knitr::kable(dunn_df)
+
+# Visualization with boxplots
+ggplot(student_data_exp, aes(x = group_condition, y = arousal_Exp_dif, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(title = "Comparison by all time difference", x = "Group-Condition", y = "arousal_Exp_dif") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+
+# Modeling with lm_robust()
+model_robust <- lm_robust(arousal_Exp_dif ~ scale(MA) * scale(Pre_MP) * Condition, data = student_data_exp)
+summary(model_robust)
+standardize_parameters(model_robust)
+
+# Plotting
+ggplot(student_data_exp, aes(x = Pre_MP, y = arousal_Exp_dif, color = MA_level, alpha = 0.7)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95) +
+  geom_jitter() +
+  labs(x = "Mathematical Performance", 
+       y = "arousal_Exp_dif",
+       color = "Math Anxiety Level") +
+  theme_minimal() +
+  facet_wrap(.~Condition) +
+  theme(legend.position = "bottom")
+
+
+```
+
+#### Valence
+
+```{r RQ4_valence_proposed, include = TRUE}
+
+# Dunn Test
+ dunn_results <- dunn.test(student_data_exp$valence_Exp_dif, student_data_exp$group_condition, method = "bonferroni")
+
+# Tidy results
+dunn_df <- data.frame(
+  comparison = dunn_results$comparisons,
+  Z = round(dunn_results$Z, 4),
+  p_adjusted = round(dunn_results$P.adjusted, 4)
+) %>% arrange(p_adjusted)
+
+knitr::kable(dunn_df)
+
+# Visualization with boxplots
+ggplot(student_data_exp, aes(x = group_condition, y = valence_Exp_dif, fill = pre_cluster_groups)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  theme_minimal() +
+  labs(title = "Comparison by all time difference", x = "Group-Condition", y = "valence_Exp_dif") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+
+# Modeling with lm_robust()
+model_robust <- lm_robust(valence_Exp_dif ~ scale(MA) * scale(Pre_MP) * Condition, data = student_data_exp)
+summary(model_robust)
+standardize_parameters(model_robust)
+
+# Plotting
+ggplot(student_data_exp, aes(x = Pre_MP, y = valence_Exp_dif, color = MA_level, alpha = 0.7)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95) +
+  geom_jitter() +
+  labs(x = "Mathematical Performance", 
+       y = "valence_Exp_dif",
+       color = "Math Anxiety Level") +
+  theme_minimal() +
+  facet_wrap(.~Condition) +
+  theme(legend.position = "bottom")
+
+# Plotting
+ggplot(student_data_exp, aes(x = MA, y = valence_Exp_dif, color = Condition, alpha = 0.7)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95) +
+  geom_jitter() +
+  labs(x = "Mathematical anxiety", 
+       y = "valence_Exp_mean") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+### Updated analysis
+
+
+#### Performance
+
+```{r RQ4_linear_MP, echo=FALSE}
+
+# Modeling with lm_robust()
+model_robust <- lm_robust(MP_dif ~ scale(MA) * scale(Pre_MP) * Condition, data = student_data_exp)
+summary(model_robust)
+standardize_parameters(model_robust)
+
+# Plotting all
+ggplot(student_data_exp, aes(x = Pre_MP, y = MP_dif, 
+                             color = MA_level)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95, alpha = 0.3) +
+  geom_jitter() +
+  labs(x = "Pretest Mathematical Performance", 
+       y = "Performance Difference (Exp - Pretest)",
+       color = "Math anxiety level") +
+ # coord_cartesian(ylim = c(-70, 40)) +
+  facet_wrap (~ Condition) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Plotting MA main effect
+ggplot(student_data_exp, aes(x = MA, y = MP_dif, color = Condition)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95, alpha = 0.3) +
+  geom_jitter() +
+  labs(x = "Math Anxiety", 
+       y = "Performance Difference (Exp - Pretest)") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Plotting Pre_MP main effect
+ggplot(student_data_exp, aes(x = Pre_MP, y = MP_dif, color = Condition)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95, alpha = 0.3) +
+  geom_jitter() +
+  labs(x = "Pretest Mathematical Performance", 
+       y = "Performance Difference (Exp - Pretest)") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+#### Time across correct responses
+
+```{r RQ4_linear_correct_response_time, echo=FALSE}
+
+# Modeling with lm_robust()
+model_robust <- lm_robust(Time_dif_Correct ~ scale(MA) * scale(Pre_MP) * Condition, data = student_data_exp)
+summary(model_robust)
+standardize_parameters(model_robust)
+
+# Plotting
+ggplot(student_data_exp, aes(x = Pre_MP, y = Time_dif_Correct, color = MA_level)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95, alpha = 0.3) +
+  geom_jitter() +
+  labs(x = "Mathematical Performance", 
+       y = "Correct Response Time Difference (Exp - Pretest)",
+       color = "Math Anxiety Level") +
+ coord_cartesian(ylim = c(-70, 50)) +
+  theme_minimal() +
+  facet_wrap(.~Condition) +
+  theme(legend.position = "bottom")
+
+```
+
+#### Time across all responses
+
+```{r RQ4_linear_response_time, echo=FALSE}
+
+# Modeling with lm_robust()
+model_robust <- lm_robust(Time_dif ~ scale(MA) * scale(Pre_MP) * Condition, data = student_data_exp)
+summary(model_robust)
+standardize_parameters(model_robust)
+
+# Plotting
+ggplot(student_data_exp, aes(x = Pre_MP, y = Time_dif, color = MA_level)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95, alpha = 0.3) +
+  geom_jitter() +
+  labs(x = "Mathematical Performance", 
+       y = "Response Time Difference (Exp - Pretest)",
+       color = "Math Anxiety Level") +
+ # coord_cartesian(ylim = c(-70, 40)) +
+  theme_minimal() +
+  facet_wrap(.~Condition) +
+  theme(legend.position = "bottom")
+
+```
+
+### Problem-level: time across correct reponses
+
+```{r RQ4_Correct_time_linear_problem_level, include = TRUE}
+
+exp_problem_level <- problem_level_math_student_data %>% filter (!grepl("^P", Image))
+exp_problem_level_correct <- exp_problem_level %>% filter (Correct == "TRUE")
+
+# Modeling with HLM
+model <- lmer(log(trialElapsedTime) ~ scale(MA) * scale(Pre_MP) * Condition + (1|problem_Order) + (1|pid),
+               data = exp_problem_level_correct)
+summary(model)
+shapiro.test(resid(model))
+
+
+problem_level_math_student_data_correct <- problem_level_math_student_data %>% filter (Correct == "TRUE")
+
+# Pretes_or_Exp = 0 for pretest, 1 for experiment
+model <- lmer(log(trialElapsedTime) ~ scale(MA) * scale(Pre_MP) * Condition * Test + (1|problem_Order) + (1|pid),
+              data = problem_level_math_student_data_correct)
+summary(model)
+shapiro.test(resid(model))
+
+```
+
+
+### Problem-level: time across all reponses
+
+```{r RQ4_All_time_linear_problem_level, include = TRUE}
+
+exp_problem_level <- problem_level_math_student_data %>% filter (!grepl("^P", Image))
+
+# Modeling with HLM
+model <- lmer(log(trialElapsedTime) ~ scale(MA) * scale(Pre_MP) * Condition + (1|problem_Order) + (1|pid),
+              data = exp_problem_level)
+summary(model)
+shapiro.test(resid(model))
+
+# Pretes_or_Exp = 0 for pretest, 1 for experiment
+model <- lmer(log(trialElapsedTime) ~ scale(MA) * scale(Pre_MP) * Condition * Test + (1|problem_Order) + (1|pid), 
+         data = problem_level_math_student_data)
+summary(model)
+shapiro.test(resid(model))
+
+# Plot
+ggplot(problem_level_math_student_data, 
+       aes(x = problem_Order, y = log(trialElapsedTime), color = Condition, group = Condition)) +
+  stat_summary(fun = mean, geom = "line", size = 1) +
+  stat_summary(fun.data = mean_se, geom = "ribbon", aes(fill = Condition), alpha = 0.2, color = NA) +
+  facet_wrap(~MA_level) +
+  labs(x = "Problem Order",
+       y = "Log(Trial Elapsed Time)",
+       title = "Time Across Problems by Condition and Cluster Group",
+       color = "Condition",
+       fill = "Condition") +
+  theme_minimal()
+
+```
+
+## Eye gaze data
+
+### Problem-level stats 
+
+```{r AOI_distribution_exp, include=TRUE}
+
+
+# Define the columns of interest
+aoi_group_columns <- c(  
+                  "Total_Problem_AOIs_prop", "Total_Response_AOIs_prop",
+                  "Total_Hits_Timer_prop", 
+                  "New_Problem_AOIs", "New_Response_AOIs",
+                  "Numerator_Denominator_Transitions", 
+                  "Total_Hits_Outside_of_Screen_prop")
+
+# ---- Stats in congruent condition
+
+print ("Congruent condition")
+
+AOI_problem_data_exp_congruent <- AOI_problem_data_exp %>% filter (Condition == "Congruent")
+
+## Pivot the data to a longer format
+long_data <- AOI_problem_data_exp_congruent %>%
+  pivot_longer(cols = all_of(aoi_group_columns), names_to = "Variable", values_to = "Value")
+
+## Compute summary statistics for each variable
+long_data %>%
+  group_by(Variable) %>%
+  summarise(
+    Minimum = min(Value, na.rm = TRUE),
+    Mean = mean(Value, na.rm = TRUE),
+    Maximum = max(Value, na.rm = TRUE),
+    `Standard Deviation` = sd(Value, na.rm = TRUE),
+    `Count > 3*SD` = sum(Value > 3 * sd(Value, na.rm = TRUE), na.rm = TRUE)
+  )
+
+# ---- Stats in incongruent condition
+
+print ("Incongruent condition")
+
+AOI_problem_data_exp_incongruent <- AOI_problem_data_exp %>% filter (Condition == "Incongruent")
+
+## Pivot the data to a longer format
+long_data <- AOI_problem_data_exp_incongruent %>%
+  pivot_longer(cols = all_of(aoi_group_columns), names_to = "Variable", values_to = "Value")
+
+## Compute summary statistics for each variable
+long_data %>%
+  group_by(Variable) %>%
+  summarise(
+    Minimum = min(Value, na.rm = TRUE),
+    Mean = mean(Value, na.rm = TRUE),
+    Maximum = max(Value, na.rm = TRUE),
+    `Standard Deviation` = sd(Value, na.rm = TRUE),
+    `Count > 3*SD` = sum(Value > 3 * sd(Value, na.rm = TRUE), na.rm = TRUE)
+  )
+
+```
+
+
+### Student-level data
+
+```{r RQ2_AOIs_student_level_exp_data, include = FALSE}
+
+## Calculate overall means
+AOI_student_data_exp <- calculate_mean_aoi(
+  data = AOI_problem_data_exp,
+  columns = aoi_group_columns,
+  suffix = "_Exp"
+)
+
+## Calculate means for correct responses
+exp_mean_AOI_correct <- calculate_mean_aoi(
+  data = AOI_problem_data_exp,
+  columns = aoi_group_columns,
+  correctness_condition = "TRUE",
+  suffix = "_Correct_Exp"
+)
+
+## Calculate means for incorrect responses
+exp_mean_AOI_incorrect <- calculate_mean_aoi(
+  data = AOI_problem_data_exp,
+  columns = aoi_group_columns,
+  correctness_condition = "FALSE",
+  suffix = "_Incorrect"
+)
+
+# Merge correct and incorrect data
+AOI_student_data_exp <- AOI_student_data_exp %>%
+  merge(exp_mean_AOI_correct, by = "pid", all.x = TRUE) %>%
+  merge(exp_mean_AOI_incorrect, by = "pid", all.x = TRUE) %>%
+  merge(AOI_student_data_pretest, by = "pid", all.x = TRUE, suffixes = c("", "_drop"))
+AOI_student_data_exp <- AOI_student_data_exp[, !grepl("_drop$", names(AOI_student_data_exp))]
+
+AOI_student_data_exp <- AOI_student_data_exp %>% merge(student_data_exp, by = "pid", all.x = TRUE, suffixes = c("", "_drop"))
+AOI_student_data_exp <- AOI_student_data_exp[, !grepl("_drop$", names(AOI_student_data_exp))]
+
+AOI_student_data_exp$Condition <- factor (AOI_student_data_exp$Condition,  
+                                             levels = c("Congruent", "Incongruent"))
+
+```
+
+```{r RQ4_AOIs_distribution_data_difference, include = F}
+
+## -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+## Create difference AOI data (experiment - pretest)
+## -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+
+AOI_student_data_exp <- AOI_student_data_exp %>% 
+  mutate(
+    
+    # new gaze couns
+    New_Problem_AOIs_Correct_dif = New_Problem_AOIs_Correct_Exp - New_Problem_AOIs_Correct_Pretest,
+    New_Response_AOIs_Correct_dif = New_Response_AOIs_Correct_Exp - New_Response_AOIs_Correct_Pretest,
+    
+    Numerator_Denominator_Transitions_Correct_dif = Numerator_Denominator_Transitions_Correct_Exp - Numerator_Denominator_Transitions_Correct_Pretest,
+    
+    # proportion-based variables for totals
+    Total_Hits_Outside_of_Screen_prop_Correct_dif = Total_Hits_Outside_of_Screen_prop_Correct_Exp - Total_Hits_Outside_of_Screen_prop_Correct_Pretest,
+    Total_Problem_AOIs_prop_Correct_dif = Total_Problem_AOIs_prop_Correct_Exp - Total_Problem_AOIs_prop_Correct_Pretest,
+    Total_Response_AOIs_prop_Correct_dif = Total_Response_AOIs_prop_Correct_Exp - Total_Response_AOIs_prop_Correct_Pretest,
+    Total_Hits_Timer_prop_Correct_dif = Total_Hits_Timer_prop_Correct_Exp - Total_Hits_Timer_prop_Correct_Pretest,
+
+    ## All problems (not only correct)
+
+    # new gaze couns
+    New_Problem_AOIs_dif = New_Problem_AOIs_Exp - New_Problem_AOIs_Pretest,
+    New_Response_AOIs_dif = New_Response_AOIs_Exp - New_Response_AOIs_Pretest,
+    Numerator_Denominator_Transitions_dif = Numerator_Denominator_Transitions_Exp - Numerator_Denominator_Transitions_Pretest,
+    
+    # proportion-based variables for totals
+    Total_Hits_Outside_of_Screen_prop_dif = Total_Hits_Outside_of_Screen_prop_Exp - Total_Hits_Outside_of_Screen_prop_Pretest,
+    Total_Problem_AOIs_prop_dif = Total_Problem_AOIs_prop_Exp - Total_Problem_AOIs_prop_Pretest,
+    Total_Response_AOIs_prop_dif = Total_Response_AOIs_prop_Exp - Total_Response_AOIs_prop_Pretest,
+    Total_Hits_Timer_prop_dif = Total_Hits_Timer_prop_Exp - Total_Hits_Timer_prop_Pretest,
+  )
+
+```
+
+#### Correct problem stats
+
+```{r RQ4_AOIs_exp_stats, echo = TRUE}
+
+# Separate sums of Total Hits
+student_total_average <- AOI_student_data_exp %>%
+  select (pid, 
+          Total_Problem_AOIs_prop_Correct_Exp, Total_Response_AOIs_prop_Correct_Exp,
+          Total_Hits_Timer_prop_Correct_Exp, 
+          Total_Hits_Outside_of_Screen_prop_Correct_Exp)
+
+# Separate sums of New Hits
+student_new_average <- AOI_student_data_exp %>%
+  select (pid, New_Problem_AOIs_Correct_Exp, New_Response_AOIs_Correct_Exp, Numerator_Denominator_Transitions_Correct_Exp) 
+
+# Create summary statistics for student-level pretest correct AOI data
+student_summary_stats <- bind_rows(
+  # For Total Hits
+  student_total_average %>%
+    select(-pid) %>%  
+    summarise(across(everything(), list(
+      mean = ~mean(., na.rm = TRUE),
+      sd = ~sd(., na.rm = TRUE),
+      median = ~median(., na.rm = TRUE),
+      max = ~max(., na.rm = TRUE),
+      zeros = ~sum(. == 0, na.rm = TRUE) / n()
+    ))) %>%
+    pivot_longer(everything(), 
+                 names_to = c("AOI", "Stat"), 
+                 names_pattern = "(.*)_(.*)") %>%
+    mutate(Type = "Total_"),
+  
+  # For New Hits
+  student_new_average %>%
+    select(-pid) %>%  
+    summarise(across(everything(), list(
+      mean = ~mean(., na.rm = TRUE),
+      sd = ~sd(., na.rm = TRUE),
+      median = ~median(., na.rm = TRUE),
+      max = ~max(., na.rm = TRUE),
+      zeros = ~sum(. == 0, na.rm = TRUE) / n()
+    ))) %>%
+    pivot_longer(everything(), 
+                 names_to = c("AOI", "Stat"), 
+                 names_pattern = "(.*)_(.*)") %>%
+    mutate(Type = "New_")
+) %>%
+  pivot_wider(names_from = Stat, values_from = value)
+
+# Display summary statistics in a clean format
+knitr::kable(student_summary_stats, 
+             digits = 2,
+             caption = "Summary Statistics for AOI Hits") %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+```
+
+#### Correct problem distributions
+
+```{r RQ2_AOIs_exp_cor_distributions, echo=TRUE}
+
+# Select relevant columns for total and new hits
+selected_data_total <- AOI_student_data_exp %>% 
+  select(Total_Problem_AOIs_prop_Correct_Exp, Total_Response_AOIs_prop_Correct_Exp,
+          Total_Hits_Timer_prop_Correct_Exp, 
+          Total_Hits_Outside_of_Screen_prop_Correct_Exp)
+
+selected_data_new <- AOI_student_data_exp %>% 
+  select(New_Problem_AOIs_Correct_Exp, New_Response_AOIs_Correct_Exp, Numerator_Denominator_Transitions_Correct_Exp)
+
+# Data for plot for Total Hits
+melted_data_total <- selected_data_total %>%
+  pivot_longer(everything(),
+               names_to = "AOI", 
+               values_to = "Hits")
+
+# Data for plot for New Hits
+melted_data_new <- selected_data_new %>%
+  pivot_longer(everything(),
+               names_to = "AOI", 
+               values_to = "Hits")
+
+# Plot for Total Hits
+ggplot(melted_data_total, aes(x = Hits)) +
+  geom_histogram(binwidth = function(x) diff(range(x))/30, 
+                 fill = '#69b3a2', 
+                 color = 'white', 
+                 alpha = 0.7) +
+  facet_wrap(~ AOI, scales = 'free', ncol = 3) +
+  labs(title = 'Distribution of Total Hits Across AOIs',
+       x = 'Number of Hits',
+       y = 'Frequency') +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 8),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Plot for New Hits
+ggplot(melted_data_new, aes(x = Hits)) +
+  geom_histogram(binwidth = function(x) diff(range(x))/30, 
+                 fill = '#404080', 
+                 color = 'white', 
+                 alpha = 0.7) +
+  facet_wrap(~ AOI, scales = 'free', ncol = 3) +
+  labs(title = 'Distribution of New Hits Across AOIs',
+       x = 'Number of Hits',
+       y = 'Frequency') +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 8),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+```
+
+
+#### Difference data stats
+
+```{r RQ4_AOIs_diff_data_stats, echo = TRUE}
+
+# Separate sums of Total Hits
+student_total_average <- AOI_student_data_exp %>%
+  select (pid, Total_Problem_AOIs_prop_Correct_dif, Total_Response_AOIs_prop_Correct_dif,
+          Total_Hits_Timer_prop_Correct_dif, 
+          Total_Hits_Outside_of_Screen_prop_Correct_dif)
+
+# Separate sums of New Hits
+student_new_average <- AOI_student_data_exp %>%
+  select (pid, New_Problem_AOIs_Correct_dif, New_Response_AOIs_Correct_dif, Numerator_Denominator_Transitions_Correct_dif) 
+
+# Create summary statistics for student-level pretest correct AOI data
+student_summary_stats <- bind_rows(
+  # For Total Hits
+  student_total_average %>%
+    select(-pid) %>%  
+    summarise(across(everything(), list(
+      min = ~min(., na.rm = TRUE),
+      mean = ~mean(., na.rm = TRUE),
+      sd = ~sd(., na.rm = TRUE),
+      median = ~median(., na.rm = TRUE),
+      max = ~max(., na.rm = TRUE),
+      zeros = ~sum(. == 0, na.rm = TRUE) / n()
+    ))) %>%
+    pivot_longer(everything(), 
+                 names_to = c("AOI", "Stat"), 
+                 names_pattern = "(.*)_(.*)") %>%
+    mutate(Type = "Total_"),
+  
+  # For New Hits
+  student_new_average %>%
+    select(-pid) %>%  
+    summarise(across(everything(), list(
+      min = ~min(., na.rm = TRUE),
+      mean = ~mean(., na.rm = TRUE),
+      sd = ~sd(., na.rm = TRUE),
+      median = ~median(., na.rm = TRUE),
+      max = ~max(., na.rm = TRUE),
+      zeros = ~sum(. == 0, na.rm = TRUE) / n()
+    ))) %>%
+    pivot_longer(everything(), 
+                 names_to = c("AOI", "Stat"), 
+                 names_pattern = "(.*)_(.*)") %>%
+    mutate(Type = "New_")
+) %>%
+  pivot_wider(names_from = Stat, values_from = value)
+
+# Display summary statistics in a clean format
+knitr::kable(student_summary_stats, 
+             digits = 2,
+             caption = "Summary Statistics for AOI Hits") %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+```
+
+#### Difference distributions
+
+```{r RQ2_AOIs_pretest_cor_diff_distributions, echo=FALSE}
+
+# Select relevant columns for total and new hits
+selected_data_total <- AOI_student_data_exp %>% 
+  select(Total_Problem_AOIs_prop_Correct_dif, Total_Response_AOIs_prop_Correct_dif,
+          Total_Hits_Timer_prop_Correct_dif, 
+          Total_Hits_Outside_of_Screen_prop_Correct_dif)
+
+selected_data_new <- AOI_student_data_exp %>% 
+  select(New_Problem_AOIs_Correct_dif, New_Response_AOIs_Correct_dif, Numerator_Denominator_Transitions_Correct_dif)
+
+# Data for plot for Total Hits
+melted_data_total <- selected_data_total %>%
+  pivot_longer(everything(),
+               names_to = "AOI", 
+               values_to = "Hits")
+
+# Data for plot for New Hits
+melted_data_new <- selected_data_new %>%
+  pivot_longer(everything(),
+               names_to = "AOI", 
+               values_to = "Hits")
+
+# Plot for Total Hits
+ggplot(melted_data_total, aes(x = Hits)) +
+  geom_histogram(binwidth = function(x) diff(range(x))/30, 
+                 fill = '#69b3a2', 
+                 color = 'white', 
+                 alpha = 0.7) +
+  facet_wrap(~ AOI, scales = 'free', ncol = 3) +
+  labs(title = 'Distribution of Differences in Total Hits Across AOIs',
+       x = 'Number of Hits',
+       y = 'Frequency') +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 8),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Plot for New Hits
+ggplot(melted_data_new, aes(x = Hits)) +
+  geom_histogram(binwidth = function(x) diff(range(x))/30, 
+                 fill = '#404080', 
+                 color = 'white', 
+                 alpha = 0.7) +
+  facet_wrap(~ AOI, scales = 'free', ncol = 3) +
+  labs(title = 'Distribution of Differences in New Hits Across AOIs',
+       x = 'Number of Hits',
+       y = 'Frequency') +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 8),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+```
+
+### Eye gaze: analysis
+
+#### How many students in each condition in each cluster
+
+```{r exp_math_data_cluster_condition_AOI, include=TRUE}
+
+print ("all participants")
+table(AOI_student_data_exp$pre_cluster_groups, AOI_student_data_exp$Condition)
+
+print ("with at least one correct response in pretest and experiment")
+AOI_student_data_exp %>% filter (Exp_MP > 0 & Pre_MP > 0) %>% 
+                        group_by (pre_cluster_groups, Condition) %>%
+                        summarise(n = n())
+
+```
+
+#### Proposed analysis
+
+##### All to all in correct responses
+
+```{r RQ4_analysis_propsed_cor_AOIs, echo=FALSE}
+
+# Deleting lMP_mMA, as it has only 1 participant
+AOI_student_data_exp_without_LP_MA_incong <- AOI_student_data_exp %>% 
+  filter (! (pre_cluster_groups == "lMP_mMA" & Condition == "Incongruent") )
+
+# List all outcomes
+outcome_vars <- c(
+  "Total_Problem_AOIs_prop_Correct_dif", 
+  "Total_Response_AOIs_prop_Correct_dif",   
+  "Total_Hits_Timer_prop_Correct_dif",
+  "New_Problem_AOIs_Correct_dif", "New_Response_AOIs_Correct_dif", 
+  "Numerator_Denominator_Transitions_Correct_dif",               
+  "Total_Hits_Outside_of_Screen_prop_Correct_dif")
+
+run_dunn_analysis <- function(data, outcomes, group_var, condition_var) {
+  results_list <- list()
+
+  for (outcome in outcomes) {
+    # Create a combined group-condition factor
+    data$group_condition <- interaction(data[[group_var]], data[[condition_var]])
+
+    # Dunn Test
+    dunn_results <- dunn.test(data[[outcome]], data$group_condition, method = "bonferroni")
+
+    # Tidy results
+    dunn_df <- data.frame(
+      outcome = outcome,
+      comparison = dunn_results$comparisons,
+      Z = round(dunn_results$Z, 4),
+      p_adjusted = round(dunn_results$P.adjusted, 4)
+    ) %>% arrange(p_adjusted)
+
+    results_list[[outcome]] <- dunn_df
+
+    # Visualization with boxplots
+    plot <- ggplot(data, aes(x = group_condition, y = .data[[outcome]], fill = .data[[condition_var]])) +
+      geom_boxplot(alpha = 0.7) +
+      geom_jitter(width = 0.2, alpha = 0.4) +
+      theme_minimal() +
+      labs(title = paste("Outcome:", outcome, "by Group-Condition"), x = "Group-Condition", y = outcome) +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+
+    print(plot)
+  }
+
+  # Combine all results
+  combined_results <- bind_rows(results_list)
+  return(combined_results)
+}
+
+results <- run_dunn_analysis(AOI_student_data_exp_without_LP_MA_incong, outcome_vars, "pre_cluster_groups", "Condition")
+knitr::kable(results)
+
+```
+
+##### All to all in all responses
+
+```{r RQ4_analysis_propsed_all_AOIs, echo=FALSE}
+
+# Deleting lMP_mMA, as it has only 1 participant
+AOI_student_data_exp_without_LP_MA_incong <- AOI_student_data_exp %>% 
+  filter (! (pre_cluster_groups == "lMP_mMA" & Condition == "Incongruent") )
+
+# List all outcomes
+outcome_vars <- c(
+  "Total_Problem_AOIs_prop_dif", 
+  "Total_Response_AOIs_prop_dif",   
+  "Total_Hits_Timer_prop_dif",
+  "New_Problem_AOIs_dif", "New_Response_AOIs_dif", 
+  "Numerator_Denominator_Transitions_dif",               
+  "Total_Hits_Outside_of_Screen_prop_dif")
+
+run_dunn_analysis <- function(data, outcomes, group_var, condition_var) {
+  results_list <- list()
+
+  for (outcome in outcomes) {
+    # Create a combined group-condition factor
+    data$group_condition <- interaction(data[[group_var]], data[[condition_var]])
+
+    # Dunn Test
+    dunn_results <- dunn.test(data[[outcome]], data$group_condition, method = "bonferroni")
+
+    # Tidy results
+    dunn_df <- data.frame(
+      outcome = outcome,
+      comparison = dunn_results$comparisons,
+      Z = round(dunn_results$Z, 4),
+      p_adjusted = round(dunn_results$P.adjusted, 4)
+    ) %>% arrange(p_adjusted)
+
+    results_list[[outcome]] <- dunn_df
+
+    # Visualization with boxplots
+    plot <- ggplot(data, aes(x = group_condition, y = .data[[outcome]], fill = .data[[condition_var]])) +
+      geom_boxplot(alpha = 0.7) +
+      geom_jitter(width = 0.2, alpha = 0.4) +
+      theme_minimal() +
+      labs(title = paste("Outcome:", outcome, "by Group-Condition"), x = "Group-Condition", y = outcome) +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+
+    print(plot)
+  }
+
+  # Combine all results
+  combined_results <- bind_rows(results_list)
+  return(combined_results)
+}
+
+results <- run_dunn_analysis(AOI_student_data_exp_without_LP_MA_incong, outcome_vars, "pre_cluster_groups", "Condition")
+knitr::kable(results)
+
+```
+
+#### Updated analysis 
+
+```{r RQ4_analysis_3, echo=FALSE}
+
+# List of outcome variables
+outcome_vars <- c(
+  "Total_Problem_AOIs_prop_Correct_dif", 
+  "Total_Response_AOIs_prop_Correct_dif",   
+  "Total_Hits_Timer_prop_Correct_dif",
+  "New_Problem_AOIs_Correct_dif", "New_Response_AOIs_Correct_dif", 
+  "Numerator_Denominator_Transitions_Correct_dif",               
+  "Total_Hits_Outside_of_Screen_prop_Correct_dif")
+
+# Plotting Total_Problem_AOIs_Correct_dif
+ggplot(AOI_student_data_exp, aes(x = Pre_MP, y = Total_Problem_AOIs_prop_Correct_dif, color = MA_level, alpha = 0.7)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95) +
+  geom_jitter() +
+  labs(x = "Mathematical Performance", 
+       y = "Total_Problem_AOIs_prop_Correct_dif (Exp - Pretest)",
+       color = "Math Anxiety Level") +
+  theme_minimal() +
+  facet_wrap(.~Condition) +
+  theme(legend.position = "bottom")
+
+# Plotting Total_Response_AOIs_Correct_dif
+ggplot(AOI_student_data_exp, aes(x = Pre_MP, y = Total_Hits_Timer_prop_Correct_dif, color = MA_level, alpha = 0.7)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95) +
+  geom_jitter() +
+  labs(x = "Mathematical Performance", 
+       y = "Total_Hits_Timer_prop_Correct_dif (Exp - Pretest)",
+       color = "Math Anxiety Level") +
+  theme_minimal() +
+  facet_wrap(.~Condition) +
+  theme(legend.position = "bottom")
+
+# Plotting Hits_Timer_prop_Correct_dif
+ggplot(AOI_student_data_exp, aes(x = Pre_MP, y = Total_Hits_Timer_prop_Correct_dif, color = Condition, alpha = 0.7)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95) +
+  geom_jitter() +
+  labs(x = "Pre_MP", 
+       y = "Total_Hits_Outside_of_Screen_prop_Correct_dif (Exp - Pretest)",
+       color = "Condition") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Plotting Hits_Timer_prop_Correct_dif
+ggplot(AOI_student_data_exp, aes(x = MA, y = Total_Hits_Outside_of_Screen_prop_Correct_dif, color = Condition, alpha = 0.7)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95) +
+  geom_jitter() +
+  labs(x = "Math Anxiety", 
+       y = "Total_Hits_Outside_of_Screen_prop_Correct_dif (Exp - Pretest)",
+       color = "Condition") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Plotting Total_Response_AOIs_Correct_dif
+ggplot(AOI_student_data_exp, aes(x = Pre_MP, y = Total_Hits_Outside_of_Screen_prop_Correct_dif, color = MA_level, alpha = 0.7)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95) +
+  geom_jitter() +
+  labs(x = "Mathematical Performance", 
+       y = "Total_Hits_Outside_of_Screen_prop_Correct_dif (Exp - Pretest)",
+       color = "Math Anxiety Level") +
+  theme_minimal() +
+  facet_wrap(.~Condition) +
+  theme(legend.position = "bottom")
+
+# Plotting New_Problem_AOIs_Correct_dif
+ggplot(AOI_student_data_exp, aes(x = Pre_MP, y = New_Problem_AOIs_Correct_dif, color = MA_level)) +
+  geom_point() +
+  geom_smooth(method = "lm", level = 0.95, alpha = 0.7) +
+  geom_jitter() +
+  labs(x = "Mathematical Performance", 
+       y = "New_Problem_AOIs_Correct_dif (Exp - Pretest)",
+       color = "Math Anxiety Level") +
+  theme_minimal() +
+ # facet_wrap(.~Condition) +
+  theme(legend.position = "bottom")
+
+#AOI_student_data_exp %>% filter(is.na(AOI_student_data_exp$Condition))
+
+```
+
+
+```{r RQ4_AOIs_analyzing_data_lm_robust, include=TRUE, warning=FALSE, message=FALSE}
+
+# Create empty dataframe for storing results
+model_summaries <- data.frame()
+
+for(dv in outcome_vars) {
+  # Fit model
+  formula <- as.formula(paste0(dv, " ~ scale(MA) * scale(Pre_MP) * Condition"))
+  
+  model <- lm_robust(
+    formula,
+    data = AOI_student_data_exp
+  )
+  
+  # Get model summary
+  sum_model <- summary(model)
+  fixed_effects <- sum_model$coefficients
+
+  # Get standardized estimates
+  std_params <- standardize_parameters(model)
+  
+  # Add to summary dataframe
+  temp_df <- data.frame(
+    DV = dv,
+    Predictor = rownames(fixed_effects),
+    Estimate = round(fixed_effects[,"Estimate"], 3),
+    SE = round(fixed_effects[,"Std. Error"], 3),
+    z_value = round(fixed_effects[,"t value"], 3),
+    p_value = fixed_effects[,"Pr(>|t|)"],
+    Std_Estimate = round(std_params$Std_Coefficient, 3)
+  )
+  
+  model_summaries <- rbind(model_summaries, temp_df)
+}
+
+# Format results
+model_summaries <- model_summaries %>%
+  mutate(
+    p_value = format.pval(p_value, digits = 3),
+    Significant = ifelse(as.numeric(p_value) < 0.05, "*", "")
+  )
+
+# Display formatted table
+kable(model_summaries,
+      caption = "Summary of Robust Linear Models",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+```
+
